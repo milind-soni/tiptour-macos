@@ -33,9 +33,8 @@ struct TutorialGuide: Codable {
 /// Generates a TutorialGuide from a YouTube video URL using Gemini
 class TutorialGuideGenerator {
 
-    // Set via TutorialGuideGenerator.apiKey before first use
-    static var apiKey: String = ""
-    private static let geminiModel = "gemini-2.5-flash"
+    /// Worker proxy URL — matches CompanionManager.workerBaseURL
+    private static let workerBaseURL = "http://localhost:8787"
 
     /// Generate a guide from a YouTube URL
     static func generate(
@@ -147,7 +146,7 @@ class TutorialGuideGenerator {
     // MARK: - Gemini Analysis
 
     private static func analyzeWithGemini(transcript: String, videoURL: String) async throws -> TutorialGuide {
-        let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(geminiModel):generateContent?key=\(apiKey)")!
+        let url = URL(string: "\(workerBaseURL)/generate-guide")!
 
         let prompt = """
         You are analyzing a YouTube software tutorial transcript. Extract every user action into a structured guide.
@@ -177,13 +176,11 @@ class TutorialGuideGenerator {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 120
 
-        let body: [String: Any] = [
-            "contents": [["parts": [["text": prompt]]]],
-            "generationConfig": ["temperature": 0.2, "maxOutputTokens": 65536]
-        ]
-
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        // Send transcript to worker proxy which forwards to Gemini
+        let requestBody: [String: Any] = ["transcript": prompt]
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -192,6 +189,7 @@ class TutorialGuideGenerator {
             throw GuideError.geminiError("HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1): \(body.prefix(200))")
         }
 
+        // Worker returns raw Gemini response
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         var textOutput = ""
         if let candidates = json?["candidates"] as? [[String: Any]] {
