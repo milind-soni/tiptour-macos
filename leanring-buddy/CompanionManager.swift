@@ -42,6 +42,70 @@ final class CompanionManager: ObservableObject {
     /// BlueCursorView uses this instead of a random pointer phrase.
     @Published var detectedElementBubbleText: String?
 
+    // MARK: - Tutorial State
+
+    @Published var activeTutorial: TutorialGuide?
+    @Published var tutorialStepIndex: Int = 0
+    @Published var isTutorialActive: Bool = false
+    @Published var tutorialVideoPlayer: AVPlayer?
+    @Published var showTutorialVideo: Bool = false
+
+    /// Start an interactive tutorial from a generated guide
+    func startTutorial(guide: TutorialGuide) {
+        activeTutorial = guide
+        tutorialStepIndex = 0
+        isTutorialActive = true
+
+        print("[Tutorial] Starting: \(guide.title) (\(guide.steps.count) steps)")
+
+        // Download video and create player
+        // For now, just log — video player will be added next
+        print("[Tutorial] Video: \(guide.videoURL)")
+
+        // Show the first step
+        if let firstStep = guide.steps.first {
+            showTutorialStep(firstStep)
+        }
+    }
+
+    func advanceTutorial() {
+        guard isTutorialActive, let guide = activeTutorial else { return }
+        tutorialStepIndex += 1
+
+        if tutorialStepIndex >= guide.steps.count {
+            // Tutorial complete
+            print("[Tutorial] Complete!")
+            isTutorialActive = false
+            activeTutorial = nil
+            detectedElementBubbleText = "Tutorial complete!"
+            return
+        }
+
+        let step = guide.steps[tutorialStepIndex]
+        print("[Tutorial] Step \(tutorialStepIndex + 1)/\(guide.steps.count): \(step.hint)")
+        showTutorialStep(step)
+    }
+
+    func stopTutorial() {
+        isTutorialActive = false
+        activeTutorial = nil
+        tutorialStepIndex = 0
+        tutorialVideoPlayer?.pause()
+        tutorialVideoPlayer = nil
+        showTutorialVideo = false
+    }
+
+    private func showTutorialStep(_ step: TutorialStep) {
+        // Set the bubble text to the step hint
+        detectedElementBubbleText = "Step \(tutorialStepIndex + 1): \(step.hint)"
+
+        // TODO: Use AX tree to find the element and point the cursor at it
+        // TODO: Pause video at this timestamp
+        // TODO: Resume video when user performs the action
+
+        print("[Tutorial] → \(step.action) \"\(step.element)\" — \(step.hint)")
+    }
+
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
     @Published var onboardingVideoPlayer: AVPlayer?

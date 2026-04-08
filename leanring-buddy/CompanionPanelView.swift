@@ -60,9 +60,16 @@ struct CompanionPanelView: View {
 
             if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
                 Spacer()
-                    .frame(height: 16)
+                    .frame(height: 12)
 
-                dmFarzaButton
+                Divider()
+                    .background(DS.Colors.borderSubtle)
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 12)
+
+                tutorialSection
                     .padding(.horizontal, 16)
             }
 
@@ -639,6 +646,116 @@ struct CompanionPanelView: View {
         }
         .buttonStyle(.plain)
         .pointerCursor()
+    }
+
+    // MARK: - Tutorial Section
+
+    @State private var tutorialURLInput: String = ""
+    @State private var tutorialStatus: String = ""
+    @State private var isTutorialLoading: Bool = false
+
+    private var tutorialSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "play.rectangle.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Text("Follow-Along Tutorial")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+            }
+
+            Text("Paste a YouTube tutorial link. TipTour will extract steps, play the video, and guide you through each action.")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary)
+                .lineLimit(3)
+
+            HStack(spacing: 6) {
+                TextField("YouTube URL", text: $tutorialURLInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                    )
+
+                Button(action: {
+                    startTutorial()
+                }) {
+                    if isTutorialLoading {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .frame(width: 50)
+                    } else {
+                        Text("Start")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(width: 50)
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.purple.opacity(0.8))
+                )
+                .pointerCursor()
+                .disabled(tutorialURLInput.isEmpty || isTutorialLoading)
+            }
+
+            if !tutorialStatus.isEmpty {
+                Text(tutorialStatus)
+                    .font(.system(size: 10))
+                    .foregroundColor(tutorialStatus.contains("Error") ? .red : DS.Colors.textTertiary)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    private func startTutorial() {
+        let urlString = tutorialURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !urlString.isEmpty else { return }
+
+        isTutorialLoading = true
+        tutorialStatus = "Extracting transcript..."
+
+        Task {
+            do {
+                let guide = try await TutorialGuideGenerator.generate(youtubeURL: urlString) { status in
+                    Task { @MainActor in
+                        tutorialStatus = status
+                    }
+                }
+
+                await MainActor.run {
+                    tutorialStatus = "Ready! \(guide.steps.count) steps extracted"
+                    isTutorialLoading = false
+                    // TODO: Start the PiP video player + guide runner
+                    companionManager.startTutorial(guide: guide)
+                }
+            } catch {
+                await MainActor.run {
+                    tutorialStatus = "Error: \(error.localizedDescription)"
+                    isTutorialLoading = false
+                }
+            }
+        }
     }
 
     // MARK: - DM Farza Button
