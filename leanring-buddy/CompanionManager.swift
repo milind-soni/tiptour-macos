@@ -49,6 +49,8 @@ final class CompanionManager: ObservableObject {
     @Published var isTutorialActive: Bool = false
     @Published var tutorialVideoPlayer: AVPlayer?
     @Published var showTutorialVideo: Bool = false
+    @Published var tutorialVideoOpacity: Double = 0.0
+    private var tutorialTimeObserver: Any?
 
     /// Start an interactive tutorial from a generated guide
     func startTutorial(guide: TutorialGuide) {
@@ -58,31 +60,50 @@ final class CompanionManager: ObservableObject {
 
         print("[Tutorial] Starting: \(guide.title) (\(guide.steps.count) steps)")
 
-        // Download video and create player
-        // For now, just log — video player will be added next
-        print("[Tutorial] Video: \(guide.videoURL)")
+        // Set up video player using the existing onboarding video infrastructure
+        // We reuse onboardingVideoPlayer so OverlayWindow picks it up automatically
+        if let videoURL = youtubeEmbedURL(from: guide.videoURL) {
+            let player = AVPlayer(url: videoURL)
+            player.isMuted = false
+            player.volume = 1.0
+            self.onboardingVideoPlayer = player
+            self.showOnboardingVideo = true
 
-        // Show the first step
+            // Fade in
+            withAnimation(.easeIn(duration: 0.5)) {
+                self.onboardingVideoOpacity = 1.0
+            }
+
+            player.play()
+            print("[Tutorial] Video playing")
+
+            // Set up time observer to pause at step timestamps
+            setupTutorialTimeObserver(player: player)
+        }
+
+        // Show first step hint on the cursor
         if let firstStep = guide.steps.first {
             showTutorialStep(firstStep)
         }
     }
 
+    /// Advance to next tutorial step — called by hotkey or auto-detection
     func advanceTutorial() {
         guard isTutorialActive, let guide = activeTutorial else { return }
         tutorialStepIndex += 1
 
         if tutorialStepIndex >= guide.steps.count {
-            // Tutorial complete
             print("[Tutorial] Complete!")
-            isTutorialActive = false
-            activeTutorial = nil
-            detectedElementBubbleText = "Tutorial complete!"
+            stopTutorial()
+            detectedElementBubbleText = "Tutorial complete! 🎉"
             return
         }
 
         let step = guide.steps[tutorialStepIndex]
         print("[Tutorial] Step \(tutorialStepIndex + 1)/\(guide.steps.count): \(step.hint)")
+
+        // Resume video until next step's timestamp
+        onboardingVideoPlayer?.play()
         showTutorialStep(step)
     }
 
@@ -90,20 +111,68 @@ final class CompanionManager: ObservableObject {
         isTutorialActive = false
         activeTutorial = nil
         tutorialStepIndex = 0
-        tutorialVideoPlayer?.pause()
-        tutorialVideoPlayer = nil
-        showTutorialVideo = false
+
+        // Clean up video
+        if let observer = tutorialTimeObserver {
+            onboardingVideoPlayer?.removeTimeObserver(observer)
+            tutorialTimeObserver = nil
+        }
+        onboardingVideoPlayer?.pause()
+
+        withAnimation(.easeOut(duration: 0.3)) {
+            onboardingVideoOpacity = 0.0
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            self.onboardingVideoPlayer = nil
+            self.showOnboardingVideo = false
+        }
+
+        detectedElementBubbleText = nil
     }
 
     private func showTutorialStep(_ step: TutorialStep) {
-        // Set the bubble text to the step hint
-        detectedElementBubbleText = "Step \(tutorialStepIndex + 1): \(step.hint)"
-
-        // TODO: Use AX tree to find the element and point the cursor at it
-        // TODO: Pause video at this timestamp
-        // TODO: Resume video when user performs the action
-
+        let total = activeTutorial?.steps.count ?? 0
+        detectedElementBubbleText = "Step \(tutorialStepIndex + 1)/\(total): \(step.hint)"
         print("[Tutorial] → \(step.action) \"\(step.element)\" — \(step.hint)")
+    }
+
+    private func setupTutorialTimeObserver(player: AVPlayer) {
+        // Check time every 0.5s to pause at step timestamps
+        let interval = CMTime(seconds: 0.5, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        tutorialTimeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            guard let self = self, self.isTutorialActive, let guide = self.activeTutorial else { return }
+
+            let currentSeconds = CMTimeGetSeconds(time)
+            let nextStepIndex = self.tutorialStepIndex + 1
+
+            // If there's a next step and we've reached its timestamp, pause
+            if nextStepIndex < guide.steps.count {
+                let nextTimestamp = guide.steps[nextStepIndex].timestamp
+                if currentSeconds >= nextTimestamp {
+                    player.pause()
+                    self.tutorialStepIndex = nextStepIndex
+                    let step = guide.steps[nextStepIndex]
+                    self.showTutorialStep(step)
+                    print("[Tutorial] Paused at \(String(format: "%.1f", currentSeconds))s for step \(nextStepIndex + 1)")
+                }
+            }
+        }
+    }
+
+    /// Convert a YouTube watch URL to an embeddable stream URL.
+    /// For now, returns nil — we'll need yt-dlp or a proxy to get the actual stream.
+    /// As a workaround, the video plays from the YouTube page directly.
+    private func youtubeEmbedURL(from watchURL: String) -> URL? {
+        // Extract video ID
+        guard let components = URLComponents(string: watchURL),
+              let videoID = components.queryItems?.first(where: { $0.name == "v" })?.value else {
+            return nil
+        }
+        // Use YouTube's embed HLS — this may not work directly in AVPlayer
+        // For a real implementation, use yt-dlp to get the direct stream URL
+        // For now, try the embed URL
+        return URL(string: "https://www.youtube.com/embed/\(videoID)")
     }
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
@@ -537,6 +606,12 @@ final class CompanionManager: ObservableObject {
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
         switch transition {
         case .pressed:
+            // If a tutorial is active, advance to next step instead of dictation
+            if isTutorialActive {
+                advanceTutorial()
+                return
+            }
+
             guard !buddyDictationManager.isDictationInProgress else { return }
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }

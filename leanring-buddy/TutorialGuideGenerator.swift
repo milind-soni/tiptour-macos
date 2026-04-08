@@ -53,7 +53,8 @@ class TutorialGuideGenerator {
         onStatus("Got transcript (\(transcript.count) chars)")
 
         // 3. Send to Gemini
-        onStatus("Analyzing with AI...")
+        print("[GuideGen] Transcript (\(transcript.count) chars):\n\(transcript.prefix(500))")
+        onStatus("Analyzing with AI (\(transcript.count) chars)...")
         let guide = try await analyzeWithGemini(transcript: transcript, videoURL: youtubeURL)
         onStatus("Done — \(guide.steps.count) steps extracted")
 
@@ -78,41 +79,70 @@ class TutorialGuideGenerator {
     // MARK: - Transcript (via YouTube's timedtext API)
 
     private static func fetchTranscript(videoID: String) async throws -> String {
-        // Try YouTube's auto-generated captions via the timedtext endpoint
-        // This is a simplified approach — for production, use youtube-transcript-api or innertube API
-        let pageURL = "https://www.youtube.com/watch?v=\(videoID)"
+        // Fetch transcript via worker proxy (avoids sandbox network issues)
+        let url = URL(string: "\(workerBaseURL)/transcript")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["videoID": videoID])
 
-        var request = URLRequest(url: URL(string: pageURL)!)
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
-
-        let (data, _) = try await URLSession.shared.data(for: request)
-        guard let html = String(data: data, encoding: .utf8) else {
-            throw GuideError.transcriptFailed("Could not load page")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw GuideError.transcriptFailed("Worker returned \((response as? HTTPURLResponse)?.statusCode ?? -1)")
         }
 
-        // Extract the captions player response JSON
-        guard let captionsStart = html.range(of: "\"captions\":") else {
-            throw GuideError.transcriptFailed("No captions found — video may not have subtitles")
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawTranscript = json["transcript"] as? String else {
+            throw GuideError.transcriptFailed("Invalid response from worker")
         }
 
-        // Find the timedtext URL in the player response
-        let searchArea = String(html[captionsStart.lowerBound...].prefix(5000))
-        guard let urlStart = searchArea.range(of: "\"baseUrl\":\""),
-              let urlEnd = searchArea[urlStart.upperBound...].range(of: "\"") else {
-            throw GuideError.transcriptFailed("Could not find caption URL")
+        // Try parsing as XML first, then VTT
+        let xmlParsed = parseTimedText(xml: rawTranscript)
+        if !xmlParsed.isEmpty { return xmlParsed }
+
+        let vttParsed = parseVTT(text: rawTranscript)
+        if !vttParsed.isEmpty { return vttParsed }
+
+        // Return raw if nothing parsed
+        return rawTranscript
+    }
+
+    /// Parse WebVTT format captions
+    private static func parseVTT(text: String) -> String {
+        var result: [String] = []
+        let lines = text.components(separatedBy: "\n")
+
+        for i in 0..<lines.count {
+            let line = lines[i].trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Look for timestamp lines like "00:00:42.000 --> 00:00:45.000"
+            if line.contains("-->") {
+                let parts = line.components(separatedBy: "-->")
+                guard let startStr = parts.first?.trimmingCharacters(in: .whitespaces) else { continue }
+
+                // Parse timestamp
+                let timeParts = startStr.components(separatedBy: ":")
+                var seconds: Double = 0
+                if timeParts.count == 3 {
+                    seconds = (Double(timeParts[0]) ?? 0) * 3600 + (Double(timeParts[1]) ?? 0) * 60 + (Double(timeParts[2].components(separatedBy: ".").first ?? "0") ?? 0)
+                } else if timeParts.count == 2 {
+                    seconds = (Double(timeParts[0]) ?? 0) * 60 + (Double(timeParts[1].components(separatedBy: ".").first ?? "0") ?? 0)
+                }
+
+                // Get the caption text (next non-empty line)
+                if i + 1 < lines.count {
+                    let captionText = lines[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !captionText.isEmpty && !captionText.contains("-->") {
+                        let mins = Int(seconds) / 60
+                        let secs = Int(seconds) % 60
+                        result.append("[\(mins):\(String(format: "%02d", secs))] \(captionText)")
+                    }
+                }
+            }
         }
 
-        var captionURL = String(searchArea[urlStart.upperBound..<urlEnd.lowerBound])
-        captionURL = captionURL.replacingOccurrences(of: "\\u0026", with: "&")
-
-        // Fetch the actual transcript XML
-        let (captionData, _) = try await URLSession.shared.data(for: URLRequest(url: URL(string: captionURL)!))
-        guard let captionXML = String(data: captionData, encoding: .utf8) else {
-            throw GuideError.transcriptFailed("Could not parse captions")
-        }
-
-        // Parse XML to extract text with timestamps
-        return parseTimedText(xml: captionXML)
+        return result.joined(separator: "\n")
     }
 
     private static func parseTimedText(xml: String) -> String {
@@ -202,6 +232,8 @@ class TutorialGuideGenerator {
                 }
             }
         }
+
+        print("[GuideGen] Gemini raw (\(textOutput.count) chars):\n\(textOutput.prefix(300))")
 
         // Clean markdown fences
         textOutput = textOutput.trimmingCharacters(in: .whitespacesAndNewlines)

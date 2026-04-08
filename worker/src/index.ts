@@ -1,3 +1,5 @@
+import { YoutubeTranscript } from "youtube-transcript";
+
 /**
  * Clicky Proxy Worker
  *
@@ -40,6 +42,10 @@ export default {
 
       if (url.pathname === "/generate-guide") {
         return await handleGenerateGuide(request, env);
+      }
+
+      if (url.pathname === "/transcript") {
+        return await handleTranscript(request);
       }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
@@ -109,6 +115,33 @@ async function handleTranscribeToken(env: Env): Promise<Response> {
     status: 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+async function handleTranscript(request: Request): Promise<Response> {
+  const { videoID } = await request.json() as { videoID: string };
+
+  try {
+    const segments = await YoutubeTranscript.fetchTranscript(videoID);
+
+    // Format as timestamped lines
+    const transcript = segments.map((s: any) => {
+      const mins = Math.floor(s.offset / 60000);
+      const secs = Math.floor((s.offset % 60000) / 1000);
+      return `[${mins}:${secs.toString().padStart(2, "0")}] ${s.text}`;
+    }).join("\n");
+
+    console.log(`[/transcript] Got ${segments.length} segments, ${transcript.length} chars`);
+
+    return new Response(JSON.stringify({ transcript }), {
+      headers: { "content-type": "application/json" },
+    });
+  } catch (e) {
+    console.error("[/transcript] Failed:", e);
+    return new Response(JSON.stringify({ error: String(e) }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    });
+  }
 }
 
 async function handleGenerateGuide(request: Request, env: Env): Promise<Response> {
