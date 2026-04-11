@@ -1,0 +1,478 @@
+{
+  "title": "Blender Beginner Basics: Moving, Modes, and First Model",
+  "app": "Blender",
+  "steps": [
+    {
+      "timestamp": 32,
+      "action": "scroll",
+      "element": "Middle scroll wheel",
+      "element_role": "mouse_component",
+      "hint": "Scroll the middle mouse wheel to zoom in and out",
+      "narration": "On your mouse, your middle scroll wheel will let you zoom out and zoom in."
+    },
+    {
+      "timestamp": 38,
+      "action": "drag",
+      "element": "Middle scroll wheel (clicked)",
+      "element_role": "mouse_component",
+      "hint": "Click and drag the middle scroll wheel to orbit around your object",
+      "narration": "If you click in the middle scroll wheel and drag around, you can go around your object in whatever way you're bringing your mouse."
+    },
+    {
+      "timestamp": 48,
+      "action": "click",
+      "element": "Shift key + Middle scroll wheel",
+      "element_role": "keyboard_shortcut",
+      "hint": "Hold Shift and click the middle scroll wheel to pan around your scene",
+      "narration": "If you hold shift and click the middle scroll wheel, you can pan around your scene."
+    },
+    {
+      "timestamp": 54,
+      "action": "type",
+      "element": "Number pad '1'",
+      "element_role": "keyboard_key",
+      "hint": "Press '1' on the number pad for front orthographic view",
+      "narration": "If you have a number pad, you can click one for front orthographic."
+    },
+    {
+      "timestamp": 59,
+      "action": "type",
+      "element": "Number pad '3'",
+      "element_role": "keyboard_key",
+      "hint": "Press '3' on the number pad for right orthographic view",
+      "narration": "Three for right orthographic"
+    },
+    {
+      "timestamp": 100,
+      "action": "type",
+      "element": "Number pad '7'",
+      "element_role": "keyboard_key",
+      "hint": "Press '7' on the number pad for top orthographic view",
+      "narration": "seven for top"
+    },
+    {
+      "timestamp": 104,
+      "action": "type",
+      "element": "Number pad '9'",
+      "element_role": "keyboard_key",
+      "hint": "Press '9' on the number pad for bottom orthographic view",
+      "narration": "and nine for bottom."
+    },
+    {
+      "timestamp": 106,
+      "action": "drag",
+      "element": "Alt key + Middle mouse wheel",
+      "element_role": "keyboard_shortcut",
+      "hint": "Hold Alt, click the middle mouse wheel, and drag to snap to views without a number pad",
+      "narration": "If you don't have a number pad, you can hold Alt on your keyboard and click in your middle mouse wheel and drag in the direction you want it to be."
+    },
+    {
+      "timestamp": 131,
+      "action": "click",
+      "element": "Cube object",
+      "element_role": "3d_object",
+      "hint": "Click on the cube object",
+      "narration": "If we click on our object, this cube"
+    },
+    {
+      "timestamp": 132,
+      "action": "click",
+      "element": "Modes dropdown menu",
+      "element_role": "dropdown_menu",
+      "hint": "Click the Modes dropdown menu",
+      "narration": "and then go up to our modes here"
+    },
+    {
+      "timestamp": 153,
+      "action": "type",
+      "element": "G key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'G' to grab (move) the object",
+      "narration": "So, let's say we press G to grab it."
+    },
+    {
+      "timestamp": 216,
+      "action": "click",
+      "element": "Vertex selection mode button",
+      "element_role": "toolbar_button",
+      "hint": "Click the vertex selection mode button",
+      "narration": "If you click on the verticy selection mode"
+    },
+    {
+      "timestamp": 218,
+      "action": "click",
+      "element": "Vertex on mesh",
+      "element_role": "3d_object_component",
+      "hint": "Click any vertex on your mesh",
+      "narration": "you can click any vert on your mesh"
+    },
+    {
+      "timestamp": 222,
+      "action": "type",
+      "element": "G key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'G' to grab the selected vertex",
+      "narration": "If we press G to grab"
+    },
+    {
+      "timestamp": 224,
+      "action": "drag",
+      "element": "Selected vertex",
+      "element_role": "3d_object_component",
+      "hint": "Drag the selected vertex to move it",
+      "narration": "we can move this in."
+    },
+    {
+      "timestamp": 228,
+      "action": "click",
+      "element": "Edge selection mode button",
+      "element_role": "toolbar_button",
+      "hint": "Click the edge selection mode button",
+      "narration": "If we want to grab a line to move it all at once"
+    },
+    {
+      "timestamp": 230,
+      "action": "click",
+      "element": "Edge on mesh",
+      "element_role": "3d_object_component",
+      "hint": "Click an edge on the mesh",
+      "narration": "grab a line"
+    },
+    {
+      "timestamp": 232,
+      "action": "click",
+      "element": "Face selection mode button",
+      "element_role": "toolbar_button",
+      "hint": "Click the face selection mode button",
+      "narration": "And if we want to grab a face"
+    },
+    {
+      "timestamp": 235,
+      "action": "click",
+      "element": "Face on mesh",
+      "element_role": "3d_object_component",
+      "hint": "Click a face on the mesh",
+      "narration": "grab a face"
+    },
+    {
+      "timestamp": 235,
+      "action": "type",
+      "element": "Ctrl+Z",
+      "element_role": "keyboard_shortcut",
+      "hint": "Press Ctrl+Z to undo",
+      "narration": "Let's press Ctrl + Z to get back to a basic cube"
+    },
+    {
+      "timestamp": 247,
+      "action": "type",
+      "element": "A key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'A' to select everything within the mesh",
+      "narration": "and I press A to select everything within this mesh."
+    },
+    {
+      "timestamp": 320,
+      "action": "type",
+      "element": "S key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'S' to scale your object",
+      "narration": "Up next is S. If you press S on your keyboard, you can scale your object down."
+    },
+    {
+      "timestamp": 332,
+      "action": "type",
+      "element": "E key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'E' to extrude a face",
+      "narration": "Up next, we have E to extrude."
+    },
+    {
+      "timestamp": 354,
+      "action": "type",
+      "element": "R key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'R' to rotate the object",
+      "narration": "Now, we could press R to rotate."
+    },
+    {
+      "timestamp": 401,
+      "action": "type",
+      "element": "R key + Y key",
+      "element_role": "keyboard_shortcut",
+      "hint": "Press 'R' then 'Y' to rotate only on the Y-axis",
+      "narration": "So if you press R and then Y, for example, you are only rotating on the Y ais."
+    },
+    {
+      "timestamp": 410,
+      "action": "type",
+      "element": "S key + X key",
+      "element_role": "keyboard_shortcut",
+      "hint": "Press 'S' then 'X' to scale only on the X-axis",
+      "narration": "So we could do scale in the X-axis, for example."
+    },
+    {
+      "timestamp": 423,
+      "action": "type",
+      "element": "Ctrl+R",
+      "element_role": "keyboard_shortcut",
+      "hint": "Press Ctrl+R to add loop cuts",
+      "narration": "CtrlR adds loop cuts"
+    },
+    {
+      "timestamp": 436,
+      "action": "scroll",
+      "element": "Middle mouse wheel",
+      "element_role": "mouse_component",
+      "hint": "Scroll the middle mouse wheel to add more loop cut segments",
+      "narration": "and we could scroll on our mouse if we want more."
+    },
+    {
+      "timestamp": 438,
+      "action": "click",
+      "element": "Left mouse button",
+      "element_role": "mouse_component",
+      "hint": "Click to confirm the loop cut placement",
+      "narration": "But for now, we're just going to click to add that one."
+    },
+    {
+      "timestamp": 441,
+      "action": "type",
+      "element": "S key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'S' to scale the new loop cut",
+      "narration": "Then we could press scale"
+    },
+    {
+      "timestamp": 453,
+      "action": "click",
+      "element": "Right mouse button",
+      "element_role": "mouse_component",
+      "hint": "Right-click to open the context menu",
+      "narration": "And sure, we could rightclick"
+    },
+    {
+      "timestamp": 456,
+      "action": "click",
+      "element": "Shade Smooth menu item",
+      "element_role": "context_menu_item",
+      "hint": "Click 'Shade Smooth'",
+      "narration": "and do shade smooth"
+    },
+    {
+      "timestamp": 458,
+      "action": "click",
+      "element": "Right mouse button",
+      "element_role": "mouse_component",
+      "hint": "Right-click to open the context menu",
+      "narration": "We could rightclick"
+    },
+    {
+      "timestamp": 500,
+      "action": "click",
+      "element": "Shade Smooth Auto Smooth menu item",
+      "element_role": "context_menu_item",
+      "hint": "Click 'Shade Smooth Auto Smooth'",
+      "narration": "do shade smooth, auto smooth"
+    },
+    {
+      "timestamp": 507,
+      "action": "click",
+      "element": "Alt key + Edge on mesh",
+      "element_role": "keyboard_shortcut",
+      "hint": "Hold Alt and click an edge to select an edge loop",
+      "narration": "If we hold alt and select this line"
+    },
+    {
+      "timestamp": 510,
+      "action": "type",
+      "element": "Ctrl+B",
+      "element_role": "keyboard_shortcut",
+      "hint": "Press Ctrl+B to bevel the selected edge",
+      "narration": "We could do controll andb to bevel this."
+    },
+    {
+      "timestamp": 515,
+      "action": "scroll",
+      "element": "Middle mouse wheel",
+      "element_role": "mouse_component",
+      "hint": "Scroll the middle mouse wheel to add more bevel segments",
+      "narration": "We can also use our scroll wheel to add more segments"
+    },
+    {
+      "timestamp": 530,
+      "action": "click",
+      "element": "Right mouse button",
+      "element_role": "mouse_component",
+      "hint": "Right-click to open the context menu",
+      "narration": "we could just shade smooth, auto smooth"
+    },
+    {
+      "timestamp": 532,
+      "action": "click",
+      "element": "Shade Smooth Auto Smooth menu item",
+      "element_role": "context_menu_item",
+      "hint": "Click 'Shade Smooth Auto Smooth'",
+      "narration": "shade smooth, auto smooth"
+    },
+    {
+      "timestamp": 558,
+      "action": "type",
+      "element": "S key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'S' to scale the object down",
+      "narration": "I'm going to press S to scale it down."
+    },
+    {
+      "timestamp": 604,
+      "action": "type",
+      "element": "Delete key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'Delete' to remove the object",
+      "narration": "Delete."
+    },
+    {
+      "timestamp": 607,
+      "action": "type",
+      "element": "Shift+A",
+      "element_role": "keyboard_shortcut",
+      "hint": "Press Shift+A to open the Add menu",
+      "narration": "If you press shift and A on your keyboard, it brings up this add menu."
+    },
+    {
+      "timestamp": 612,
+      "action": "click",
+      "element": "Mesh menu item",
+      "element_role": "menu_item",
+      "hint": "Click 'Mesh' in the Add menu",
+      "narration": "I am in this mesh subsection."
+    },
+    {
+      "timestamp": 622,
+      "action": "click",
+      "element": "Cylinder menu item",
+      "element_role": "menu_item",
+      "hint": "Click 'Cylinder' to add a cylinder",
+      "narration": "We're going to bring in this cylinder right here."
+    },
+    {
+      "timestamp": 630,
+      "action": "click",
+      "element": "Add Cylinder options arrow",
+      "element_role": "button",
+      "hint": "Click the arrow to expand the Add Cylinder options",
+      "narration": "We could click this arrow down here"
+    },
+    {
+      "timestamp": 634,
+      "action": "type",
+      "element": "Vertices count field",
+      "element_role": "text_field",
+      "hint": "Type '8' into the Vertices count field",
+      "narration": "I'm going to put it at eight."
+    },
+    {
+      "timestamp": 640,
+      "action": "type",
+      "element": "Tab key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'Tab' to switch to Edit Mode",
+      "narration": "The shortcut for this would be tab on your keyboard to switch back and forth."
+    },
+    {
+      "timestamp": 644,
+      "action": "type",
+      "element": "S key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'S' to scale the cylinder down",
+      "narration": "But in edit mode, let's scale this down."
+    },
+    {
+      "timestamp": 647,
+      "action": "click",
+      "element": "Top face of cylinder",
+      "element_role": "3d_object_component",
+      "hint": "Click the top face of the cylinder",
+      "narration": "Grab our top face"
+    },
+    {
+      "timestamp": 649,
+      "action": "drag",
+      "element": "Selected face",
+      "element_role": "3d_object_component",
+      "hint": "Drag the selected face up",
+      "narration": "and drag it up."
+    },
+    {
+      "timestamp": 650,
+      "action": "type",
+      "element": "S key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'S' to scale the top face",
+      "narration": "Press S to scale."
+    },
+    {
+      "timestamp": 653,
+      "action": "click",
+      "element": "Right mouse button",
+      "element_role": "mouse_component",
+      "hint": "Right-click to open the context menu",
+      "narration": "We could rightclick"
+    },
+    {
+      "timestamp": 655,
+      "action": "click",
+      "element": "Shade Smooth Auto Smooth menu item",
+      "element_role": "context_menu_item",
+      "hint": "Click 'Shade Smooth Auto Smooth'",
+      "narration": "shade smooth auto smooth."
+    },
+    {
+      "timestamp": 657,
+      "action": "drag",
+      "element": "Auto Smooth Angle setting",
+      "element_role": "slider",
+      "hint": "Adjust the Auto Smooth Angle setting",
+      "narration": "We can also up this angle so it actually looks a bit smoother."
+    },
+    {
+      "timestamp": 659,
+      "action": "type",
+      "element": "Shift+A",
+      "element_role": "keyboard_shortcut",
+      "hint": "Press Shift+A to open the Add menu again",
+      "narration": "Let's do shift A again."
+    },
+    {
+      "timestamp": 702,
+      "action": "click",
+      "element": "Circle menu item",
+      "element_role": "menu_item",
+      "hint": "Click 'Circle' to add a circle",
+      "narration": "And let's add in let's do a circle cuz why not?"
+    },
+    {
+      "timestamp": 705,
+      "action": "type",
+      "element": "Vertices count field",
+      "element_role": "text_field",
+      "hint": "Type '12' into the Vertices count field for the circle",
+      "narration": "And we'll make this 12 sides."
+    },
+    {
+      "timestamp": 708,
+      "action": "type",
+      "element": "Tab key",
+      "element_role": "keyboard_key",
+      "hint": "Press 'Tab' to switch to Edit Mode",
+      "narration": "Now let's tab into edit mode once again."
+    },
+    {
+      "timestamp": 711,
+      "action": "click",
+      "element": "Edge selection mode button",
+      "element_role": "toolbar_button",
+      "hint": "Click the edge selection mode button",
+      "narration": "Go to our line select mode"
+    }
+  ]
+}

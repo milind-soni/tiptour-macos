@@ -69,6 +69,10 @@ class TutorialGuideGenerator {
     }
 
     /// Download YouTube video to a temp file using yt-dlp
+    static func downloadVideoPublic(videoID: String) async throws -> String {
+        return try await downloadVideo(videoID: videoID)
+    }
+
     private static func downloadVideo(videoID: String) async throws -> String {
         let outputPath = NSTemporaryDirectory() + "tiptour-\(videoID).mp4"
 

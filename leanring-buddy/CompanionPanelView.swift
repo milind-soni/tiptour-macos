@@ -816,12 +816,13 @@ struct CompanionPanelView: View {
                 Spacer()
 
                 Button(action: {
-                    companionManager.replayOnboarding()
+                    companionManager.startDemoTutorial()
+                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
                 }) {
                     HStack(spacing: 6) {
-                        Image(systemName: "play.circle")
+                        Image(systemName: "play.rectangle.fill")
                             .font(.system(size: 11, weight: .medium))
-                        Text("Watch Onboarding Again")
+                        Text("Watch Demo Tour")
                             .font(.system(size: 12, weight: .medium))
                     }
                     .foregroundColor(DS.Colors.textTertiary)

@@ -117,6 +117,66 @@ final class CompanionManager: ObservableObject {
         showTutorialStep(step)
     }
 
+    /// Load and start the pre-built demo tutorial
+    func startDemoTutorial() {
+        // Load demo guide from the demo folder
+        let demoPath = Bundle.main.path(forResource: "demo-guide", ofType: "json")
+            ?? (FileManager.default.currentDirectoryPath + "/demo/demo-guide.json")
+
+        // Try multiple paths
+        let paths = [
+            demoPath,
+            NSHomeDirectory() + "/Documents/mywork/tiptour-macos/demo/demo-guide.json"
+        ]
+
+        for path in paths {
+            guard FileManager.default.fileExists(atPath: path),
+                  let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+
+            let title = raw["title"] as? String ?? "Demo"
+            let app = raw["app"] as? String ?? "Blender"
+            let rawSteps = raw["steps"] as? [[String: Any]] ?? []
+
+            let steps: [TutorialStep] = rawSteps.enumerated().map { i, dict in
+                TutorialStep(
+                    id: "step-\(i+1)",
+                    timestamp: dict["timestamp"] as? Double ?? 0,
+                    action: dict["action"] as? String ?? "click",
+                    element: dict["element"] as? String ?? "",
+                    elementRole: dict["element_role"] as? String,
+                    hint: dict["hint"] as? String ?? "",
+                    narration: dict["narration"] as? String
+                )
+            }
+
+            let guide = TutorialGuide(title: title, app: app, steps: steps, videoURL: "https://www.youtube.com/watch?v=peSv5IT5Ve4")
+
+            // Download video if not cached
+            let videoID = "peSv5IT5Ve4"
+            let videoPath = NSTemporaryDirectory() + "tiptour-\(videoID).mp4"
+
+            if FileManager.default.fileExists(atPath: videoPath) {
+                startTutorial(guide: guide, videoPath: videoPath)
+            } else {
+                // Download in background, start without video for now
+                startTutorial(guide: guide, videoPath: nil)
+                Task {
+                    if let path = try? await TutorialGuideGenerator.downloadVideoPublic(videoID: videoID) {
+                        print("[Demo] Video downloaded: \(path)")
+                    }
+                }
+            }
+
+            print("[Demo] Loaded \(steps.count) steps from \(path)")
+            return
+        }
+
+        print("[Demo] Could not find demo-guide.json")
+    }
+
     func stopTutorial() {
         isTutorialActive = false
         activeTutorial = nil
@@ -245,15 +305,39 @@ final class CompanionManager: ObservableObject {
             print("[Tutorial] Claude: \(fullText)")
 
             let parseResult = CompanionManager.parsePointingCoordinates(from: fullText)
-            if let coordinate = parseResult.coordinate {
+            if let pointCoordinate = parseResult.coordinate {
                 await MainActor.run {
-                    self.detectedElementScreenLocation = coordinate
-                    self.detectedElementDisplayFrame = CGRect(x: coordinate.x - 10, y: coordinate.y - 10, width: 20, height: 20)
+                    // Convert screenshot pixel coords → AppKit global screen coords
+                    // Same conversion as the regular chat flow
+                    let screenshotWidth = CGFloat(primary.screenshotWidthInPixels)
+                    let screenshotHeight = CGFloat(primary.screenshotHeightInPixels)
+                    let displayWidth = CGFloat(primary.displayWidthInPoints)
+                    let displayHeight = CGFloat(primary.displayHeightInPoints)
+                    let displayFrame = primary.displayFrame
+
+                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
+                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+
+                    // Scale from screenshot pixels to display points
+                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+
+                    // Flip Y: screenshot top-left → AppKit bottom-left
+                    let appKitY = displayHeight - displayLocalY
+
+                    // Display-local → global screen coords
+                    let globalLocation = CGPoint(
+                        x: displayLocalX + displayFrame.origin.x,
+                        y: appKitY + displayFrame.origin.y
+                    )
+
+                    self.detectedElementScreenLocation = globalLocation
+                    self.detectedElementDisplayFrame = displayFrame
                     self.detectedElementBubbleText = parseResult.elementLabel ?? step.element
-                    print("[Tutorial] Pointing at (\(Int(coordinate.x)), \(Int(coordinate.y)))")
+                    print("[Tutorial] Pointing at pixel(\(Int(pointCoordinate.x)),\(Int(pointCoordinate.y))) → screen(\(Int(globalLocation.x)),\(Int(globalLocation.y)))")
                 }
             } else {
-                print("[Tutorial] Element not found on screen — text only")
+                print("[Tutorial] Element not found — text only")
             }
         } catch {
             print("[Tutorial] Claude error: \(error.localizedDescription)")
@@ -266,20 +350,22 @@ final class CompanionManager: ObservableObject {
         tutorialTimeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             guard let self = self, self.isTutorialActive, let guide = self.activeTutorial else { return }
 
-            // Skip observer briefly after manual advance to let video play
-            guard Date() > self.tutorialSkipObserverUntil else { return }
-
             let currentSeconds = CMTimeGetSeconds(time)
-            let nextStepIndex = self.tutorialStepIndex + 1
+            let currentStep = self.tutorialStepIndex
 
+            // Look ahead: if the NEXT step's timestamp has been reached, pause
+            // and show the CURRENT step (what user needs to do now)
+            let nextStepIndex = currentStep + 1
             if nextStepIndex < guide.steps.count {
                 let nextTimestamp = guide.steps[nextStepIndex].timestamp
-                if currentSeconds >= nextTimestamp {
+                if currentSeconds >= nextTimestamp - 0.5 {
+                    // Pause slightly before the next step starts
                     player.pause()
+                    // Show the NEXT step — this is what the user needs to do
                     self.tutorialStepIndex = nextStepIndex
                     let step = guide.steps[nextStepIndex]
                     self.showTutorialStep(step)
-                    print("[Tutorial] Auto-paused at \(String(format: "%.1f", currentSeconds))s for step \(nextStepIndex + 1)")
+                    print("[Tutorial] Paused at \(String(format: "%.1f", currentSeconds))s → Step \(nextStepIndex + 1): \(step.hint)")
                 }
             }
         }
