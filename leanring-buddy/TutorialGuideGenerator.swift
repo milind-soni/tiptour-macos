@@ -36,29 +36,71 @@ class TutorialGuideGenerator {
     /// Worker proxy URL — matches CompanionManager.workerBaseURL
     private static let workerBaseURL = "http://localhost:8787"
 
-    /// Generate a guide from a YouTube URL
+    /// Generate a guide from a YouTube URL. Returns guide + local video path.
     static func generate(
         youtubeURL: String,
         onStatus: @escaping (String) -> Void
-    ) async throws -> TutorialGuide {
+    ) async throws -> (guide: TutorialGuide, videoPath: String?) {
 
         // 1. Extract video ID
         guard let videoID = extractVideoID(from: youtubeURL) else {
             throw GuideError.invalidURL
         }
 
-        // 2. Fetch transcript
+        // 2. Download video with yt-dlp
+        onStatus("Downloading video...")
+        let videoPath = try? await downloadVideo(videoID: videoID)
+        if let path = videoPath {
+            print("[GuideGen] Video downloaded: \(path)")
+        }
+
+        // 3. Fetch transcript
         onStatus("Fetching transcript...")
         let transcript = try await fetchTranscript(videoID: videoID)
         onStatus("Got transcript (\(transcript.count) chars)")
 
-        // 3. Send to Gemini
+        // 4. Send to Gemini
         print("[GuideGen] Transcript (\(transcript.count) chars):\n\(transcript.prefix(500))")
-        onStatus("Analyzing with AI (\(transcript.count) chars)...")
+        onStatus("Analyzing with AI...")
         let guide = try await analyzeWithGemini(transcript: transcript, videoURL: youtubeURL)
         onStatus("Done — \(guide.steps.count) steps extracted")
 
-        return guide
+        return (guide, videoPath)
+    }
+
+    /// Download YouTube video to a temp file using yt-dlp
+    private static func downloadVideo(videoID: String) async throws -> String {
+        let outputPath = NSTemporaryDirectory() + "tiptour-\(videoID).mp4"
+
+        // Skip if already downloaded
+        if FileManager.default.fileExists(atPath: outputPath) {
+            print("[GuideGen] Video already cached")
+            return outputPath
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/yt-dlp")
+        process.arguments = [
+            "-f", "worst[ext=mp4]",  // smallest for speed
+            "--max-filesize", "100M",
+            "-o", outputPath,
+            "https://www.youtube.com/watch?v=\(videoID)"
+        ]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0 {
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            print("[GuideGen] yt-dlp error: \(output.prefix(200))")
+            throw GuideError.transcriptFailed("Video download failed")
+        }
+
+        return outputPath
     }
 
     // MARK: - Video ID
@@ -178,11 +220,15 @@ class TutorialGuideGenerator {
     private static func analyzeWithGemini(transcript: String, videoURL: String) async throws -> TutorialGuide {
         let url = URL(string: "\(workerBaseURL)/generate-guide")!
 
+        // Clip transcript for speed — first 3000 chars covers ~2 mins
+        let clippedTranscript = String(transcript.prefix(3000))
+        print("[GuideGen] Sending \(clippedTranscript.count) chars to Gemini via worker")
+
         let prompt = """
         You are analyzing a YouTube software tutorial transcript. Extract every user action into a structured guide.
 
         TRANSCRIPT:
-        \(String(transcript.prefix(12000)))
+        \(clippedTranscript)
 
         For each action the user performs, output:
         - timestamp (seconds)
@@ -233,7 +279,11 @@ class TutorialGuideGenerator {
             }
         }
 
-        print("[GuideGen] Gemini raw (\(textOutput.count) chars):\n\(textOutput.prefix(300))")
+        print("[GuideGen] Gemini raw (\(textOutput.count) chars):\n\(textOutput.prefix(500))")
+        if textOutput.isEmpty {
+            let rawBody = String(data: data, encoding: .utf8) ?? ""
+            print("[GuideGen] Full response body:\n\(rawBody.prefix(500))")
+        }
 
         // Clean markdown fences
         textOutput = textOutput.trimmingCharacters(in: .whitespacesAndNewlines)

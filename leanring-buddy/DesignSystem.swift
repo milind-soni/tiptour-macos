@@ -141,7 +141,7 @@ enum DS {
         /// The blue cursor/bubble color used in OverlayWindow.
         /// Kept distinct from the accent since it serves a different purpose
         /// (screen overlay vs in-app UI).
-        static let overlayCursorBlue = Color(hex: "#3380FF")
+        static let overlayCursorBlue = Color(hex: "#FF6B6B") // coral
 
         // ── Floating Button Gradient ─────────────────────────────────
 
