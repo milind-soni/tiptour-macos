@@ -51,25 +51,33 @@ final class CompanionManager: ObservableObject {
     @Published var showTutorialVideo: Bool = false
     @Published var tutorialVideoOpacity: Double = 0.0
     private var tutorialTimeObserver: Any?
+    private var tutorialSkipObserverUntil: Date = .distantPast
 
     /// Start an interactive tutorial from a generated guide
-    func startTutorial(guide: TutorialGuide) {
+    func startTutorial(guide: TutorialGuide, videoPath: String? = nil) {
         activeTutorial = guide
         tutorialStepIndex = 0
         isTutorialActive = true
 
         print("[Tutorial] Starting: \(guide.title) (\(guide.steps.count) steps)")
 
-        // Set up video player using the existing onboarding video infrastructure
-        // We reuse onboardingVideoPlayer so OverlayWindow picks it up automatically
-        if let videoURL = youtubeEmbedURL(from: guide.videoURL) {
+        // Play the local video file if available
+        let videoURL: URL?
+        if let path = videoPath {
+            videoURL = URL(fileURLWithPath: path)
+            print("[Tutorial] Playing local video: \(path)")
+        } else {
+            videoURL = nil
+            print("[Tutorial] No video file — steps only")
+        }
+
+        if let videoURL = videoURL {
             let player = AVPlayer(url: videoURL)
             player.isMuted = false
             player.volume = 1.0
             self.onboardingVideoPlayer = player
             self.showOnboardingVideo = true
 
-            // Fade in
             withAnimation(.easeIn(duration: 0.5)) {
                 self.onboardingVideoOpacity = 1.0
             }
@@ -77,7 +85,6 @@ final class CompanionManager: ObservableObject {
             player.play()
             print("[Tutorial] Video playing")
 
-            // Set up time observer to pause at step timestamps
             setupTutorialTimeObserver(player: player)
         }
 
@@ -102,8 +109,11 @@ final class CompanionManager: ObservableObject {
         let step = guide.steps[tutorialStepIndex]
         print("[Tutorial] Step \(tutorialStepIndex + 1)/\(guide.steps.count): \(step.hint)")
 
-        // Resume video until next step's timestamp
+        // Seek video to this step's timestamp — video keeps playing
+        let seekTime = CMTime(seconds: step.timestamp, preferredTimescale: 600)
+        onboardingVideoPlayer?.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
         onboardingVideoPlayer?.play()
+
         showTutorialStep(step)
     }
 
@@ -112,7 +122,6 @@ final class CompanionManager: ObservableObject {
         activeTutorial = nil
         tutorialStepIndex = 0
 
-        // Clean up video
         if let observer = tutorialTimeObserver {
             onboardingVideoPlayer?.removeTimeObserver(observer)
             tutorialTimeObserver = nil
@@ -129,12 +138,126 @@ final class CompanionManager: ObservableObject {
         }
 
         detectedElementBubbleText = nil
+        onboardingPromptText = ""
+        onboardingPromptOpacity = 0.0
+        showOnboardingPrompt = false
+        clearDetectedElementLocation()
     }
 
     private func showTutorialStep(_ step: TutorialStep) {
         let total = activeTutorial?.steps.count ?? 0
-        detectedElementBubbleText = "Step \(tutorialStepIndex + 1)/\(total): \(step.hint)"
+        let stepLabel = "Step \(tutorialStepIndex + 1)/\(total): \(step.hint)"
+
+        // Make sure overlay is visible
+        if !isOverlayVisible {
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+
         print("[Tutorial] → \(step.action) \"\(step.element)\" — \(step.hint)")
+
+        // Keyboard/type actions — just show the text, no pointing
+        let isKeyboardAction = step.action == "type" || step.action == "hold"
+            || step.element.lowercased().contains("key")
+            || step.element.lowercased().contains("shortcut")
+            || step.element.lowercased().contains("ctrl")
+            || step.element.lowercased().contains("shift")
+            || step.element.lowercased().contains("cmd")
+
+        // Always show the step text via the onboarding prompt (visible next to cursor)
+        onboardingPromptText = stepLabel
+        onboardingPromptOpacity = 1.0
+        showOnboardingPrompt = true
+
+        if isKeyboardAction {
+            // Keyboard step — just show text, no pointing
+            clearDetectedElementLocation()
+            print("[Tutorial] Keyboard step — showing text only")
+            return
+        }
+
+        // Click/drag/scroll actions — take screenshot and point
+        detectedElementBubbleText = step.element
+
+        Task {
+            await pointCursorForStep(step)
+        }
+    }
+
+    /// Takes a screenshot, sends to Claude with tutorial context, and points the cursor.
+    private func pointCursorForStep(_ step: TutorialStep) async {
+        guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else {
+            print("[Tutorial] Screenshot failed")
+            return
+        }
+
+        guard let primary = screenshots.first else { return }
+
+        let base64Image = primary.imageData.base64EncodedString()
+        let screenLabel = primary.label
+
+        // Include tutorial context so Claude knows what app and what we're doing
+        let tutorialContext = activeTutorial.map { "Tutorial: \($0.title) in \($0.app)" } ?? ""
+
+        let requestBody: [String: Any] = [
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 200,
+            "stream": false,
+            "system": """
+            You see a screenshot of a macOS app (\(screenLabel)).
+            \(tutorialContext)
+
+            The user is following a tutorial and needs to find a specific UI element.
+            Reply with ONLY a [POINT:x,y:\(step.element)] tag pointing at the element.
+            Coordinates are pixels from top-left of the screenshot.
+            If the element is not visible on screen, reply with [POINT:none].
+            """,
+            "messages": [
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": base64Image]],
+                        ["type": "text", "text": "I need to \(step.action) the \"\(step.element)\" (\(step.elementRole ?? "UI element")). \(step.narration ?? ""). Point at it."]
+                    ]
+                ]
+            ]
+        ]
+
+        do {
+            let requestData = try JSONSerialization.data(withJSONObject: requestBody)
+            var request = URLRequest(url: URL(string: "\(CompanionManager.workerBaseURL)/chat")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = requestData
+            request.timeoutInterval = 20
+
+            let (data, _) = try await URLSession.shared.data(for: request)
+
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let content = json["content"] as? [[String: Any]],
+                  let textBlock = content.first(where: { $0["type"] as? String == "text" }),
+                  let fullText = textBlock["text"] as? String else {
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                print("[Tutorial] Could not parse response: \(raw.prefix(200))")
+                return
+            }
+
+            print("[Tutorial] Claude: \(fullText)")
+
+            let parseResult = CompanionManager.parsePointingCoordinates(from: fullText)
+            if let coordinate = parseResult.coordinate {
+                await MainActor.run {
+                    self.detectedElementScreenLocation = coordinate
+                    self.detectedElementDisplayFrame = CGRect(x: coordinate.x - 10, y: coordinate.y - 10, width: 20, height: 20)
+                    self.detectedElementBubbleText = parseResult.elementLabel ?? step.element
+                    print("[Tutorial] Pointing at (\(Int(coordinate.x)), \(Int(coordinate.y)))")
+                }
+            } else {
+                print("[Tutorial] Element not found on screen — text only")
+            }
+        } catch {
+            print("[Tutorial] Claude error: \(error.localizedDescription)")
+        }
     }
 
     private func setupTutorialTimeObserver(player: AVPlayer) {
@@ -143,10 +266,12 @@ final class CompanionManager: ObservableObject {
         tutorialTimeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             guard let self = self, self.isTutorialActive, let guide = self.activeTutorial else { return }
 
+            // Skip observer briefly after manual advance to let video play
+            guard Date() > self.tutorialSkipObserverUntil else { return }
+
             let currentSeconds = CMTimeGetSeconds(time)
             let nextStepIndex = self.tutorialStepIndex + 1
 
-            // If there's a next step and we've reached its timestamp, pause
             if nextStepIndex < guide.steps.count {
                 let nextTimestamp = guide.steps[nextStepIndex].timestamp
                 if currentSeconds >= nextTimestamp {
@@ -154,26 +279,12 @@ final class CompanionManager: ObservableObject {
                     self.tutorialStepIndex = nextStepIndex
                     let step = guide.steps[nextStepIndex]
                     self.showTutorialStep(step)
-                    print("[Tutorial] Paused at \(String(format: "%.1f", currentSeconds))s for step \(nextStepIndex + 1)")
+                    print("[Tutorial] Auto-paused at \(String(format: "%.1f", currentSeconds))s for step \(nextStepIndex + 1)")
                 }
             }
         }
     }
 
-    /// Convert a YouTube watch URL to an embeddable stream URL.
-    /// For now, returns nil — we'll need yt-dlp or a proxy to get the actual stream.
-    /// As a workaround, the video plays from the YouTube page directly.
-    private func youtubeEmbedURL(from watchURL: String) -> URL? {
-        // Extract video ID
-        guard let components = URLComponents(string: watchURL),
-              let videoID = components.queryItems?.first(where: { $0.name == "v" })?.value else {
-            return nil
-        }
-        // Use YouTube's embed HLS — this may not work directly in AVPlayer
-        // For a real implementation, use yt-dlp to get the direct stream URL
-        // For now, try the embed URL
-        return URL(string: "https://www.youtube.com/embed/\(videoID)")
-    }
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
