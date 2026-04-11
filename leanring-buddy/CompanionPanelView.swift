@@ -830,8 +830,108 @@ struct CompanionPanelView: View {
                 .buttonStyle(.plain)
                 .pointerCursor()
             }
+
+            #if DEBUG
+            Spacer().frame(height: 4)
+            devToolsSection
+            #endif
         }
     }
+
+    // MARK: - Dev Tools (DEBUG only)
+
+    #if DEBUG
+    private var devToolsSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("DEV TOOLS")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(DS.Colors.textTertiary.opacity(0.5))
+
+            HStack(spacing: 4) {
+                devButton("Fly →", systemImage: "arrow.right.circle") {
+                    // Fly cursor to center of screen
+                    let screen = NSScreen.main!
+                    let centerX = screen.frame.midX
+                    let centerY = screen.frame.midY
+                    companionManager.detectedElementScreenLocation = CGPoint(x: centerX, y: centerY)
+                    companionManager.detectedElementDisplayFrame = screen.frame
+                    companionManager.detectedElementBubbleText = "Test target"
+                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                }
+
+                devButton("Bubble", systemImage: "text.bubble") {
+                    companionManager.onboardingPromptText = "Step 5/12: Click the File menu in the top menu bar"
+                    companionManager.onboardingPromptOpacity = 1.0
+                    companionManager.showOnboardingPrompt = true
+                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                }
+
+                devButton("Clear", systemImage: "xmark.circle") {
+                    companionManager.clearDetectedElementLocation()
+                    companionManager.onboardingPromptText = ""
+                    companionManager.onboardingPromptOpacity = 0.0
+                    companionManager.showOnboardingPrompt = false
+                    companionManager.stopTutorial()
+                }
+            }
+
+            HStack(spacing: 4) {
+                devButton("Step +1", systemImage: "forward.fill") {
+                    companionManager.advanceTutorial()
+                }
+
+                devButton("Demo", systemImage: "play.fill") {
+                    companionManager.startDemoTutorial()
+                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                }
+
+                devButton("Stop", systemImage: "stop.fill") {
+                    companionManager.stopTutorial()
+                }
+            }
+
+            if companionManager.isTutorialActive {
+                let idx = companionManager.tutorialStepIndex
+                let total = companionManager.activeTutorial?.steps.count ?? 0
+                let step = companionManager.activeTutorial?.steps[safe: idx]
+                Text("Tutorial: \(idx + 1)/\(total) — \(step?.element ?? "?")")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.green.opacity(0.7))
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.green.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color.green.opacity(0.15), lineWidth: 0.5)
+                )
+        )
+    }
+
+    private func devButton(_ label: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 9))
+                Text(label)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+            }
+            .foregroundColor(.green.opacity(0.7))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.green.opacity(0.08))
+            )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+    #endif
 
     // MARK: - Visual Helpers
 
@@ -875,4 +975,10 @@ struct CompanionPanelView: View {
         }
     }
 
+}
+
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
 }
