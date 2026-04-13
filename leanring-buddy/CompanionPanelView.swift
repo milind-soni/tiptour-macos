@@ -890,6 +890,54 @@ struct CompanionPanelView: View {
                 }
             }
 
+            HStack(spacing: 4) {
+                devButton(
+                    companionManager.onboardingVideoPlayer?.isMuted == true ? "🔇 Unmute" : "🔊 Mute",
+                    systemImage: companionManager.onboardingVideoPlayer?.isMuted == true ? "speaker.slash" : "speaker.wave.2"
+                ) {
+                    companionManager.onboardingVideoPlayer?.isMuted.toggle()
+                }
+
+                devButton("Vol 0", systemImage: "speaker") {
+                    companionManager.onboardingVideoPlayer?.volume = 0
+                }
+
+                devButton("Vol 1", systemImage: "speaker.wave.3") {
+                    companionManager.onboardingVideoPlayer?.volume = 1.0
+                }
+            }
+
+            HStack(spacing: 4) {
+                devButton("⌨ Key", systemImage: "keyboard") {
+                    companionManager.isTutorialActive = true
+                    companionManager.tutorialActionType = "keyboard"
+                    companionManager.tutorialKeyLabel = "G"
+                    companionManager.onboardingPromptText = "Press G to grab"
+                    companionManager.onboardingPromptOpacity = 1.0
+                    companionManager.showOnboardingPrompt = true
+                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                }
+
+                devButton("⌨ Combo", systemImage: "keyboard") {
+                    companionManager.isTutorialActive = true
+                    companionManager.tutorialActionType = "keyboard"
+                    companionManager.tutorialKeyLabel = "Ctrl+Z"
+                    companionManager.onboardingPromptText = "Press Ctrl+Z to undo"
+                    companionManager.onboardingPromptOpacity = 1.0
+                    companionManager.showOnboardingPrompt = true
+                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                }
+
+                devButton("↕ Scroll", systemImage: "arrow.up.arrow.down") {
+                    companionManager.isTutorialActive = true
+                    companionManager.tutorialActionType = "scroll"
+                    companionManager.onboardingPromptText = "Scroll to zoom in and out"
+                    companionManager.onboardingPromptOpacity = 1.0
+                    companionManager.showOnboardingPrompt = true
+                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                }
+            }
+
             if companionManager.isTutorialActive {
                 let idx = companionManager.tutorialStepIndex
                 let total = companionManager.activeTutorial?.steps.count ?? 0
