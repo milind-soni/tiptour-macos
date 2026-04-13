@@ -17,6 +17,7 @@ interface Env {
   ELEVENLABS_VOICE_ID: string;
   ASSEMBLYAI_API_KEY: string;
   GEMINI_API_KEY: string;
+  OPENROUTER_API_KEY: string;
 }
 
 export default {
@@ -38,6 +39,10 @@ export default {
 
       if (url.pathname === "/transcribe-token") {
         return await handleTranscribeToken(env);
+      }
+
+      if (url.pathname === "/chat-fast") {
+        return await handleChatFast(request, env);
       }
 
       if (url.pathname === "/generate-guide") {
@@ -172,6 +177,42 @@ async function handleGenerateGuide(request: Request, env: Env): Promise<Response
   return new Response(data, {
     status: 200,
     headers: { "content-type": "application/json" },
+  });
+}
+
+async function handleChatFast(request: Request, env: Env): Promise<Response> {
+  const body = await request.text();
+  const parsed = JSON.parse(body);
+
+  // Override model to use a fast one via OpenRouter
+  parsed.model = parsed.model || "google/gemma-4-31b-it";
+
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://tiptour.io",
+      "X-Title": "TipTour",
+    },
+    body: JSON.stringify(parsed),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`[/chat-fast] OpenRouter error ${response.status}: ${errorBody}`);
+    return new Response(errorBody, {
+      status: response.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    headers: {
+      "content-type": response.headers.get("content-type") || "application/json",
+      "cache-control": "no-cache",
+    },
   });
 }
 

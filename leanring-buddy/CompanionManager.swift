@@ -311,7 +311,7 @@ final class CompanionManager: ObservableObject {
         // Fallback: Claude Vision
         let tutorialContext = activeTutorial.map { "Tutorial: \($0.title) in \($0.app)" } ?? ""
         let requestBody: [String: Any] = [
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-haiku-4-5-20251001",
             "max_tokens": 200,
             "stream": false,
             "system": "You see a screenshot of a macOS app (\(primary.label)). \(tutorialContext). Reply with ONLY [POINT:x,y:\(step.element)]. Pixels from top-left. If not visible, [POINT:none].",
@@ -472,7 +472,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isOverlayVisible: Bool = false
 
     /// The Claude model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-haiku-4-5-20251001"
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
