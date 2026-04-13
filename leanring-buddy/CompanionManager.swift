@@ -50,6 +50,10 @@ final class CompanionManager: ObservableObject {
     @Published var tutorialVideoPlayer: AVPlayer?
     @Published var showTutorialVideo: Bool = false
     @Published var tutorialVideoOpacity: Double = 0.0
+    /// Current tutorial action type for animation rendering (keyboard, scroll, click, etc.)
+    @Published var tutorialActionType: String = ""
+    /// Key label to display for keyboard actions (e.g. "G", "Ctrl+Z")
+    @Published var tutorialKeyLabel: String = ""
     private var tutorialTimeObserver: Any?
     private var tutorialSkipObserverUntil: Date = .distantPast
 
@@ -201,6 +205,8 @@ final class CompanionManager: ObservableObject {
         onboardingPromptText = ""
         onboardingPromptOpacity = 0.0
         showOnboardingPrompt = false
+        tutorialActionType = ""
+        tutorialKeyLabel = ""
         clearDetectedElementLocation()
     }
 
@@ -216,7 +222,10 @@ final class CompanionManager: ObservableObject {
 
         print("[Tutorial] → \(step.action) \"\(step.element)\" — \(step.hint)")
 
-        // Keyboard/type actions — just show the text, no pointing
+        // Set action type for animation rendering
+        tutorialActionType = step.action
+
+        // Detect keyboard actions
         let isKeyboardAction = step.action == "type" || step.action == "hold"
             || step.element.lowercased().contains("key")
             || step.element.lowercased().contains("shortcut")
@@ -224,27 +233,61 @@ final class CompanionManager: ObservableObject {
             || step.element.lowercased().contains("shift")
             || step.element.lowercased().contains("cmd")
 
-        // Always show the step text via the onboarding prompt (visible next to cursor)
+        let isScrollAction = step.action == "scroll"
+            || step.element.lowercased().contains("scroll")
+
+        // Show unified step text — no separate bubble to avoid overlap
         onboardingPromptText = stepLabel
         onboardingPromptOpacity = 1.0
         showOnboardingPrompt = true
+        detectedElementBubbleText = nil  // prevent overlap
 
         if isKeyboardAction {
-            // Keyboard step — just show text, no pointing
+            tutorialActionType = "keyboard"
+            // Extract key label from element name (e.g. "G key" → "G", "Ctrl+Z" → "Ctrl+Z")
+            tutorialKeyLabel = extractKeyLabel(from: step.element)
             clearDetectedElementLocation()
-            print("[Tutorial] Keyboard step — showing text only")
+            print("[Tutorial] Keyboard: \(tutorialKeyLabel)")
             return
         }
 
-        // Click/drag/scroll actions — take screenshot and point
-        detectedElementBubbleText = step.element
+        if isScrollAction {
+            tutorialActionType = "scroll"
+            tutorialKeyLabel = ""
+            clearDetectedElementLocation()
+            print("[Tutorial] Scroll action")
+            return
+        }
 
+        // Click/drag actions — screenshot + point
+        tutorialKeyLabel = ""
         Task {
             await pointCursorForStep(step)
         }
     }
 
-    /// Takes a screenshot, sends to Claude with tutorial context, and points the cursor.
+    /// Extract the key label from an element name like "G key", "Number pad '3'", "Ctrl+Z"
+    private func extractKeyLabel(from element: String) -> String {
+        let el = element.trimmingCharacters(in: .whitespaces)
+
+        // "G key" → "G"
+        if el.lowercased().hasSuffix(" key") {
+            return String(el.dropLast(4)).trimmingCharacters(in: .whitespaces)
+        }
+
+        // "Number pad '3'" → "3"
+        if let match = el.range(of: #"'([^']+)'"#, options: .regularExpression) {
+            return String(el[match]).replacingOccurrences(of: "'", with: "")
+        }
+
+        // "Ctrl+Z", "Shift+A" → as-is
+        if el.contains("+") { return el }
+
+        // "Tab key" already handled, "Delete key" etc.
+        return el.replacingOccurrences(of: " key", with: "")
+    }
+
+    /// Takes a screenshot, finds the element via OmniParser (local) or Claude (fallback).
     private func pointCursorForStep(_ step: TutorialStep) async {
         guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else {
             print("[Tutorial] Screenshot failed")
@@ -252,35 +295,33 @@ final class CompanionManager: ObservableObject {
         }
 
         guard let primary = screenshots.first else { return }
-
         let base64Image = primary.imageData.base64EncodedString()
-        let screenLabel = primary.label
 
-        // Include tutorial context so Claude knows what app and what we're doing
+        // Try OmniParser first (local, fast, no API cost)
+        if let found = await OmniParserClient.shared.findElement(query: step.element, imageBase64: base64Image) {
+            print("[Tutorial] OmniParser found \"\(found.label)\" at (\(Int(found.center.x)),\(Int(found.center.y)))")
+            await MainActor.run {
+                self.pointAtScreenPixel(found.center, capture: primary, label: step.element)
+            }
+            return
+        }
+
+        print("[Tutorial] OmniParser miss — falling back to Claude")
+
+        // Fallback: Claude Vision
         let tutorialContext = activeTutorial.map { "Tutorial: \($0.title) in \($0.app)" } ?? ""
-
         let requestBody: [String: Any] = [
             "model": "claude-sonnet-4-20250514",
             "max_tokens": 200,
             "stream": false,
-            "system": """
-            You see a screenshot of a macOS app (\(screenLabel)).
-            \(tutorialContext)
-
-            The user is following a tutorial and needs to find a specific UI element.
-            Reply with ONLY a [POINT:x,y:\(step.element)] tag pointing at the element.
-            Coordinates are pixels from top-left of the screenshot.
-            If the element is not visible on screen, reply with [POINT:none].
-            """,
-            "messages": [
-                [
-                    "role": "user",
-                    "content": [
-                        ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": base64Image]],
-                        ["type": "text", "text": "I need to \(step.action) the \"\(step.element)\" (\(step.elementRole ?? "UI element")). \(step.narration ?? ""). Point at it."]
-                    ]
+            "system": "You see a screenshot of a macOS app (\(primary.label)). \(tutorialContext). Reply with ONLY [POINT:x,y:\(step.element)]. Pixels from top-left. If not visible, [POINT:none].",
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": base64Image]],
+                    ["type": "text", "text": "\(step.action) \"\(step.element)\". Point at it."]
                 ]
-            ]
+            ]]
         ]
 
         do {
@@ -296,52 +337,45 @@ final class CompanionManager: ObservableObject {
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let content = json["content"] as? [[String: Any]],
                   let textBlock = content.first(where: { $0["type"] as? String == "text" }),
-                  let fullText = textBlock["text"] as? String else {
-                let raw = String(data: data, encoding: .utf8) ?? ""
-                print("[Tutorial] Could not parse response: \(raw.prefix(200))")
-                return
-            }
+                  let fullText = textBlock["text"] as? String else { return }
 
             print("[Tutorial] Claude: \(fullText)")
 
             let parseResult = CompanionManager.parsePointingCoordinates(from: fullText)
-            if let pointCoordinate = parseResult.coordinate {
+            if let coord = parseResult.coordinate {
                 await MainActor.run {
-                    // Convert screenshot pixel coords → AppKit global screen coords
-                    // Same conversion as the regular chat flow
-                    let screenshotWidth = CGFloat(primary.screenshotWidthInPixels)
-                    let screenshotHeight = CGFloat(primary.screenshotHeightInPixels)
-                    let displayWidth = CGFloat(primary.displayWidthInPoints)
-                    let displayHeight = CGFloat(primary.displayHeightInPoints)
-                    let displayFrame = primary.displayFrame
-
-                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-
-                    // Scale from screenshot pixels to display points
-                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-
-                    // Flip Y: screenshot top-left → AppKit bottom-left
-                    let appKitY = displayHeight - displayLocalY
-
-                    // Display-local → global screen coords
-                    let globalLocation = CGPoint(
-                        x: displayLocalX + displayFrame.origin.x,
-                        y: appKitY + displayFrame.origin.y
-                    )
-
-                    self.detectedElementScreenLocation = globalLocation
-                    self.detectedElementDisplayFrame = displayFrame
-                    self.detectedElementBubbleText = parseResult.elementLabel ?? step.element
-                    print("[Tutorial] Pointing at pixel(\(Int(pointCoordinate.x)),\(Int(pointCoordinate.y))) → screen(\(Int(globalLocation.x)),\(Int(globalLocation.y)))")
+                    self.pointAtScreenPixel(coord, capture: primary, label: parseResult.elementLabel ?? step.element)
                 }
-            } else {
-                print("[Tutorial] Element not found — text only")
             }
         } catch {
             print("[Tutorial] Claude error: \(error.localizedDescription)")
         }
+    }
+
+    /// Convert screenshot pixel coordinates to AppKit screen coords and point the cursor there.
+    private func pointAtScreenPixel(_ pixel: CGPoint, capture: CompanionScreenCapture, label: String) {
+        let screenshotWidth = CGFloat(capture.screenshotWidthInPixels)
+        let screenshotHeight = CGFloat(capture.screenshotHeightInPixels)
+        let displayWidth = CGFloat(capture.displayWidthInPoints)
+        let displayHeight = CGFloat(capture.displayHeightInPoints)
+        let displayFrame = capture.displayFrame
+
+        let clampedX = max(0, min(pixel.x, screenshotWidth))
+        let clampedY = max(0, min(pixel.y, screenshotHeight))
+
+        let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+        let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+        let appKitY = displayHeight - displayLocalY
+
+        let globalLocation = CGPoint(
+            x: displayLocalX + displayFrame.origin.x,
+            y: appKitY + displayFrame.origin.y
+        )
+
+        detectedElementScreenLocation = globalLocation
+        detectedElementDisplayFrame = displayFrame
+        detectedElementBubbleText = label
+        print("[Tutorial] → screen(\(Int(globalLocation.x)),\(Int(globalLocation.y)))")
     }
 
     private func setupTutorialTimeObserver(player: AVPlayer) {
