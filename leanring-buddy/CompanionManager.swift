@@ -308,38 +308,41 @@ final class CompanionManager: ObservableObject {
 
         print("[Tutorial] OmniParser miss — falling back to Claude")
 
-        // Fallback: Claude Vision
+        // Fallback: Gemma 4 via OpenRouter (fast, vision-capable)
         let tutorialContext = activeTutorial.map { "Tutorial: \($0.title) in \($0.app)" } ?? ""
         let requestBody: [String: Any] = [
-            "model": "claude-haiku-4-5-20251001",
+            "model": "google/gemma-4-31b-it",
             "max_tokens": 200,
-            "stream": false,
-            "system": "You see a screenshot of a macOS app (\(primary.label)). \(tutorialContext). Reply with ONLY [POINT:x,y:\(step.element)]. Pixels from top-left. If not visible, [POINT:none].",
-            "messages": [[
-                "role": "user",
-                "content": [
-                    ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": base64Image]],
+            "messages": [
+                ["role": "system", "content": "You see a screenshot of a macOS app (\(primary.label)). \(tutorialContext). Reply with ONLY [POINT:x,y:\(step.element)] with pixel coordinates from top-left. If not visible, reply [POINT:none]."],
+                ["role": "user", "content": [
+                    ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]],
                     ["type": "text", "text": "\(step.action) \"\(step.element)\". Point at it."]
-                ]
-            ]]
+                ]]
+            ]
         ]
 
         do {
             let requestData = try JSONSerialization.data(withJSONObject: requestBody)
-            var request = URLRequest(url: URL(string: "\(CompanionManager.workerBaseURL)/chat")!)
+            var request = URLRequest(url: URL(string: "\(CompanionManager.workerBaseURL)/chat-fast")!)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "content-type")
             request.httpBody = requestData
-            request.timeoutInterval = 20
+            request.timeoutInterval = 15
 
             let (data, _) = try await URLSession.shared.data(for: request)
 
+            // OpenRouter returns OpenAI format
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let content = json["content"] as? [[String: Any]],
-                  let textBlock = content.first(where: { $0["type"] as? String == "text" }),
-                  let fullText = textBlock["text"] as? String else { return }
+                  let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let fullText = message["content"] as? String else {
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                print("[Tutorial] OpenRouter parse fail: \(raw.prefix(200))")
+                return
+            }
 
-            print("[Tutorial] Claude: \(fullText)")
+            print("[Tutorial] Gemma: \(fullText)")
 
             let parseResult = CompanionManager.parsePointingCoordinates(from: fullText)
             if let coord = parseResult.coordinate {
@@ -348,7 +351,7 @@ final class CompanionManager: ObservableObject {
                 }
             }
         } catch {
-            print("[Tutorial] Claude error: \(error.localizedDescription)")
+            print("[Tutorial] Gemma error: \(error.localizedDescription)")
         }
     }
 
@@ -1040,7 +1043,7 @@ final class CompanionManager: ObservableObject {
                         await MainActor.run {
                             self.pointAtScreenPixel(omniResult.center, capture: targetCapture, label: elementLabel)
                         }
-                    } else if let omniResult = await OmniParserClient.shared.findElement(query: elementLabel, imageBase64: targetCapture.imageData.base64EncodedString()) {
+                    } else if let omniResult = await OmniParserClient.shared.findElement(query: elementLabel, imageBase64: targetCapture.imageData.base64EncodedString()), omniResult.cacheAgeMs < 5000 {
                         // OmniParser found it — use its coordinates (more precise than Claude)
                         print("🎯 OmniParser found \"\(elementLabel)\" at (\(Int(omniResult.center.x)),\(Int(omniResult.center.y)))")
                         await MainActor.run {
