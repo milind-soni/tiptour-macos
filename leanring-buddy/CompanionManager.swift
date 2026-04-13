@@ -547,6 +547,9 @@ final class CompanionManager: ObservableObject {
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
 
+        // Start OmniParser live feeding — keeps element cache warm
+        startOmniParserLiveFeeding()
+
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
         // were revoked (e.g. signing change), don't show the cursor — the
@@ -825,6 +828,16 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    /// Start feeding screenshots to OmniParser every 1.5s for live element detection
+    private func startOmniParserLiveFeeding() {
+        OmniParserClient.shared.startLiveFeeding(interval: 1.5) {
+            // Capture screenshot for OmniParser
+            guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else { return nil }
+            guard let primary = screenshots.first else { return nil }
+            return primary.imageData.base64EncodedString()
+        }
+    }
+
     private func bindShortcutTransitions() {
         shortcutTransitionCancellable = globalPushToTalkShortcutMonitor
             .shortcutTransitionPublisher
@@ -1017,36 +1030,47 @@ final class CompanionManager: ObservableObject {
 
                 if let pointCoordinate = parseResult.coordinate,
                    let targetScreenCapture {
-                    // Claude's coordinates are in the screenshot's pixel space
-                    // (top-left origin, e.g. 1280x831). Scale to the display's
-                    // point space (e.g. 1512x982), then convert to AppKit global coords.
-                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
-                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
-                    let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
-                    let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
-                    let displayFrame = targetScreenCapture.displayFrame
+                    // Try OmniParser cache first (instant), then full scan, then Claude coordinates
+                    let elementLabel = parseResult.elementLabel ?? "element"
+                    let targetCapture = targetScreenCapture
 
-                    // Clamp to screenshot coordinate space
-                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+                    // Try instant cache lookup first
+                    if let omniResult = await OmniParserClient.shared.findFromCache(query: elementLabel) {
+                        print("🎯 OmniParser CACHE hit \"\(elementLabel)\" at (\(Int(omniResult.center.x)),\(Int(omniResult.center.y))) [age: \(omniResult.cacheAgeMs)ms]")
+                        await MainActor.run {
+                            self.pointAtScreenPixel(omniResult.center, capture: targetCapture, label: elementLabel)
+                        }
+                    } else if let omniResult = await OmniParserClient.shared.findElement(query: elementLabel, imageBase64: targetCapture.imageData.base64EncodedString()) {
+                        // OmniParser found it — use its coordinates (more precise than Claude)
+                        print("🎯 OmniParser found \"\(elementLabel)\" at (\(Int(omniResult.center.x)),\(Int(omniResult.center.y)))")
+                        await MainActor.run {
+                            self.pointAtScreenPixel(omniResult.center, capture: targetCapture, label: elementLabel)
+                        }
+                    } else {
+                        // Fall back to Claude's coordinates
+                        let screenshotWidth = CGFloat(targetCapture.screenshotWidthInPixels)
+                        let screenshotHeight = CGFloat(targetCapture.screenshotHeightInPixels)
+                        let displayWidth = CGFloat(targetCapture.displayWidthInPoints)
+                        let displayHeight = CGFloat(targetCapture.displayHeightInPoints)
+                        let displayFrame = targetCapture.displayFrame
 
-                    // Scale from screenshot pixels to display points
-                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+                        let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
+                        let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+                        let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+                        let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+                        let appKitY = displayHeight - displayLocalY
 
-                    // Convert from top-left origin (screenshot) to bottom-left origin (AppKit)
-                    let appKitY = displayHeight - displayLocalY
+                        let globalLocation = CGPoint(
+                            x: displayLocalX + displayFrame.origin.x,
+                            y: appKitY + displayFrame.origin.y
+                        )
 
-                    // Convert display-local coords to global screen coords
-                    let globalLocation = CGPoint(
-                        x: displayLocalX + displayFrame.origin.x,
-                        y: appKitY + displayFrame.origin.y
-                    )
+                        detectedElementScreenLocation = globalLocation
+                        detectedElementDisplayFrame = displayFrame
+                        print("🎯 Claude pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(elementLabel)\"")
+                    }
 
-                    detectedElementScreenLocation = globalLocation
-                    detectedElementDisplayFrame = displayFrame
                     ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
-                    print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
                 } else {
                     print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
                 }
