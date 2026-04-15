@@ -259,6 +259,16 @@ struct BlueCursorView: View {
                     }
             }
 
+            // YOLO detection overlay — shows all detected elements as boxes
+            if companionManager.showDetectionOverlay {
+                DetectionOverlayView(
+                    elements: companionManager.detectedElements,
+                    highlightedLabel: companionManager.highlightedElementLabel,
+                    screenFrame: screenFrame,
+                    imageSize: companionManager.detectedImageSize
+                )
+            }
+
             // Tutorial action animations (keyboard keys, scroll indicator)
             if companionManager.isTutorialActive {
                 TutorialActionOverlay(companionManager: companionManager, cursorPosition: cursorPosition)

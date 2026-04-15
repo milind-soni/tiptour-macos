@@ -842,31 +842,22 @@ struct CompanionPanelView: View {
 
     #if DEBUG
     private var devToolsSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("DEV TOOLS")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundColor(DS.Colors.textTertiary.opacity(0.5))
-
-            HStack(spacing: 4) {
-                devButton("Fly →", systemImage: "arrow.right.circle") {
-                    // Fly cursor to center of screen
-                    let screen = NSScreen.main!
-                    let centerX = screen.frame.midX
-                    let centerY = screen.frame.midY
-                    companionManager.detectedElementScreenLocation = CGPoint(x: centerX, y: centerY)
-                    companionManager.detectedElementDisplayFrame = screen.frame
-                    companionManager.detectedElementBubbleText = "Test target"
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 3) {
+                dtx("UI", .purple) { Task { await switchModel("ui") } }
+                dtx("Gen", .orange) { Task { await switchModel("general") } }
+                dtx(companionManager.showDetectionOverlay ? "■" : "□", .green) {
+                    companionManager.showDetectionOverlay.toggle()
                     NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
                 }
-
-                devButton("Bubble", systemImage: "text.bubble") {
-                    companionManager.onboardingPromptText = "Step 5/12: Click the File menu in the top menu bar"
-                    companionManager.onboardingPromptOpacity = 1.0
-                    companionManager.showOnboardingPrompt = true
+                dtx("Fly", .blue) {
+                    let s = NSScreen.main!
+                    companionManager.detectedElementScreenLocation = CGPoint(x: s.frame.midX, y: s.frame.midY)
+                    companionManager.detectedElementDisplayFrame = s.frame
+                    companionManager.detectedElementBubbleText = "Test"
                     NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
                 }
-
-                devButton("Clear", systemImage: "xmark.circle") {
+                dtx("✕", .red) {
                     companionManager.clearDetectedElementLocation()
                     companionManager.onboardingPromptText = ""
                     companionManager.onboardingPromptOpacity = 0.0
@@ -874,110 +865,64 @@ struct CompanionPanelView: View {
                     companionManager.stopTutorial()
                 }
             }
-
-            HStack(spacing: 4) {
-                devButton("Step +1", systemImage: "forward.fill") {
-                    companionManager.advanceTutorial()
-                }
-
-                devButton("Demo", systemImage: "play.fill") {
+            HStack(spacing: 3) {
+                dtx("▶", .green) {
                     companionManager.startDemoTutorial()
                     NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
                 }
-
-                devButton("Stop", systemImage: "stop.fill") {
-                    companionManager.stopTutorial()
-                }
-            }
-
-            HStack(spacing: 4) {
-                devButton(
-                    companionManager.onboardingVideoPlayer?.isMuted == true ? "🔇 Unmute" : "🔊 Mute",
-                    systemImage: companionManager.onboardingVideoPlayer?.isMuted == true ? "speaker.slash" : "speaker.wave.2"
-                ) {
-                    companionManager.onboardingVideoPlayer?.isMuted.toggle()
-                }
-
-                devButton("Vol 0", systemImage: "speaker") {
-                    companionManager.onboardingVideoPlayer?.volume = 0
-                }
-
-                devButton("Vol 1", systemImage: "speaker.wave.3") {
-                    companionManager.onboardingVideoPlayer?.volume = 1.0
-                }
-            }
-
-            HStack(spacing: 4) {
-                devButton("⌨ Key", systemImage: "keyboard") {
+                dtx("⏭", .green) { companionManager.advanceTutorial() }
+                dtx("⌨", .cyan) {
                     companionManager.isTutorialActive = true
                     companionManager.tutorialActionType = "keyboard"
                     companionManager.tutorialKeyLabel = "G"
-                    companionManager.onboardingPromptText = "Press G to grab"
+                    companionManager.onboardingPromptText = "Press G"
                     companionManager.onboardingPromptOpacity = 1.0
                     companionManager.showOnboardingPrompt = true
                     NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
                 }
-
-                devButton("⌨ Combo", systemImage: "keyboard") {
-                    companionManager.isTutorialActive = true
-                    companionManager.tutorialActionType = "keyboard"
-                    companionManager.tutorialKeyLabel = "Ctrl+Z"
-                    companionManager.onboardingPromptText = "Press Ctrl+Z to undo"
-                    companionManager.onboardingPromptOpacity = 1.0
-                    companionManager.showOnboardingPrompt = true
-                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-                }
-
-                devButton("↕ Scroll", systemImage: "arrow.up.arrow.down") {
+                dtx("↕", .cyan) {
                     companionManager.isTutorialActive = true
                     companionManager.tutorialActionType = "scroll"
-                    companionManager.onboardingPromptText = "Scroll to zoom in and out"
+                    companionManager.onboardingPromptText = "Scroll"
                     companionManager.onboardingPromptOpacity = 1.0
                     companionManager.showOnboardingPrompt = true
                     NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
                 }
-            }
-
-            if companionManager.isTutorialActive {
-                let idx = companionManager.tutorialStepIndex
-                let total = companionManager.activeTutorial?.steps.count ?? 0
-                let step = companionManager.activeTutorial?.steps[safe: idx]
-                Text("Tutorial: \(idx + 1)/\(total) — \(step?.element ?? "?")")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(.green.opacity(0.7))
-                    .lineLimit(1)
+                dtx("🔇", .yellow) { companionManager.onboardingVideoPlayer?.isMuted.toggle() }
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(6)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.green.opacity(0.05))
+                .fill(Color.white.opacity(0.03))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(Color.green.opacity(0.15), lineWidth: 0.5)
+                        .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
                 )
         )
     }
 
-    private func devButton(_ label: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    private func dtx(_ label: String, _ color: Color, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 3) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 9))
-                Text(label)
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-            }
-            .foregroundColor(.green.opacity(0.7))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(Color.green.opacity(0.08))
-            )
+            Text(label)
+                .font(.system(size: 10))
+                .frame(height: 22)
+                .padding(.horizontal, 8)
+                .foregroundColor(color)
+                .background(RoundedRectangle(cornerRadius: 4).fill(color.opacity(0.1)))
         }
         .buttonStyle(.plain)
         .pointerCursor()
+    }
+
+    private func switchModel(_ modelId: String) async {
+        guard let url = URL(string: "http://localhost:8765/switch") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": modelId])
+        _ = try? await URLSession.shared.data(for: request)
+        print("[Dev] Switched to: \(modelId)")
     }
     #endif
 

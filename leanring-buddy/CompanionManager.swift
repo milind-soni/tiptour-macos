@@ -52,6 +52,14 @@ final class CompanionManager: ObservableObject {
     @Published var tutorialVideoOpacity: Double = 0.0
     /// Current tutorial action type for animation rendering (keyboard, scroll, click, etc.)
     @Published var tutorialActionType: String = ""
+    /// Show YOLO detection boxes overlay — toggle from dev tools
+    @Published var showDetectionOverlay: Bool = false
+    /// Latest detected elements from OmniParser for overlay rendering
+    @Published var detectedElements: [[String: Any]] = []
+    /// Image size of the screenshot used for detection (for coordinate scaling)
+    @Published var detectedImageSize: [Int] = [1512, 982]
+    /// The element currently being highlighted (matched by voice query)
+    @Published var highlightedElementLabel: String? = nil
     /// Key label to display for keyboard actions (e.g. "G", "Ctrl+Z")
     @Published var tutorialKeyLabel: String = ""
     private var tutorialTimeObserver: Any?
@@ -355,6 +363,66 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    /// Queue labels to point at sequentially — for multi-step navigation.
+    /// After the current pointing animation finishes, waits 2s for the user
+    /// to click, re-scans the screen, and finds the next element by label.
+    private var pendingLiveSteps: [String] = []
+
+    private func queuePendingSteps(_ labels: [String]) {
+        pendingLiveSteps = labels
+        print("🎯 Queued \(labels.count) live steps: \(labels)")
+
+        // Watch for when the current pointing finishes (element location clears)
+        // then trigger the next step
+        Task {
+            // Wait for current pointing to finish (arrow flies back)
+            while detectedElementScreenLocation != nil {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+
+            // Wait a moment for user to perform the click
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+            // Process next step
+            await processNextLiveStep()
+        }
+    }
+
+    private func processNextLiveStep() async {
+        guard !pendingLiveSteps.isEmpty else { return }
+        let nextLabel = pendingLiveSteps.removeFirst()
+        print("🎯 Live step: finding \"\(nextLabel)\"...")
+
+        // Take a fresh screenshot and try OmniParser
+        guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(),
+              let primary = screenshots.first else { return }
+
+        let base64Image = primary.imageData.base64EncodedString()
+
+        // Try OmniParser cache first, then full scan
+        if let found = await OmniParserClient.shared.findFromCache(query: nextLabel) {
+            print("🎯 Live step: cache hit \"\(nextLabel)\" at (\(Int(found.center.x)),\(Int(found.center.y)))")
+            await MainActor.run {
+                self.pointAtScreenPixel(found.center, capture: primary, label: nextLabel)
+            }
+        } else if let found = await OmniParserClient.shared.findElement(query: nextLabel, imageBase64: base64Image) {
+            print("🎯 Live step: found \"\(nextLabel)\" at (\(Int(found.center.x)),\(Int(found.center.y)))")
+            await MainActor.run {
+                self.pointAtScreenPixel(found.center, capture: primary, label: nextLabel)
+            }
+        } else {
+            print("🎯 Live step: \"\(nextLabel)\" not found — showing text")
+            await MainActor.run {
+                self.detectedElementBubbleText = nextLabel
+            }
+        }
+
+        // If more steps remain, queue them
+        if !pendingLiveSteps.isEmpty {
+            queuePendingSteps(pendingLiveSteps)
+        }
+    }
+
     /// Convert screenshot pixel coordinates to AppKit screen coords and point the cursor there.
     private func pointAtScreenPixel(_ pixel: CGPoint, capture: CompanionScreenCapture, label: String) {
         let screenshotWidth = CGFloat(capture.screenshotWidthInPixels)
@@ -655,6 +723,7 @@ final class CompanionManager: ObservableObject {
         detectedElementScreenLocation = nil
         detectedElementDisplayFrame = nil
         detectedElementBubbleText = nil
+        highlightedElementLabel = nil
     }
 
     func stop() {
@@ -833,12 +902,40 @@ final class CompanionManager: ObservableObject {
 
     /// Start feeding screenshots to OmniParser every 1.5s for live element detection
     private func startOmniParserLiveFeeding() {
-        OmniParserClient.shared.startLiveFeeding(interval: 1.5) {
-            // Capture screenshot for OmniParser
+        OmniParserClient.shared.startLiveFeeding(interval: 1.5) { [weak self] in
             guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else { return nil }
             guard let primary = screenshots.first else { return nil }
-            return primary.imageData.base64EncodedString()
+            let b64 = primary.imageData.base64EncodedString()
+
+            // If detection overlay is on, fetch full element list for rendering
+            if self?.showDetectionOverlay == true {
+                Task {
+                    await self?.fetchDetectedElements(imageBase64: b64)
+                }
+            }
+
+            return b64
         }
+    }
+
+    /// Fetch all detected elements from OmniParser for overlay rendering
+    private func fetchDetectedElements(imageBase64: String) async {
+        guard let url = URL(string: "http://localhost:8765/cache") else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let elements = json["elements"] as? [[String: Any]] else { return }
+
+            let imgSize = json["image_size"] as? [Int] ?? [1512, 982]
+
+            await MainActor.run {
+                self.detectedElements = elements
+                self.detectedImageSize = imgSize
+            }
+        } catch {}
     }
 
     private func bindShortcutTransitions() {
@@ -882,16 +979,12 @@ final class CompanionManager: ObservableObject {
             elevenLabsTTSClient.stopPlayback()
             clearDetectedElementLocation()
 
-            // Dismiss the onboarding prompt if it's showing
-            if showOnboardingPrompt {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    onboardingPromptOpacity = 0.0
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    self.showOnboardingPrompt = false
-                    self.onboardingPromptText = ""
-                }
-            }
+            // Clear any tutorial/prompt overlay
+            showOnboardingPrompt = false
+            onboardingPromptText = ""
+            onboardingPromptOpacity = 0.0
+            tutorialActionType = ""
+            tutorialKeyLabel = ""
     
 
             ClickyAnalytics.trackPushToTalkStarted()
@@ -953,12 +1046,17 @@ final class CompanionManager: ObservableObject {
 
     format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
 
+    MULTI-STEP NAVIGATION: for nested actions like "how to undo" that require opening a menu first, use multiple [POINT:] tags with [STEP] between them. the cursor will fly to each one in sequence, waiting for the user to click before moving to the next.
+
+    format for multi-step: spoken text [POINT:x,y:first element] [STEP] [POINT:x,y:second element]
+
     if pointing wouldn't help, append [POINT:none].
 
     examples:
     - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
     - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
+    - user asks how to undo: "click the edit menu, then hit undo. [POINT:175,11:edit menu] [STEP] [POINT:none:undo]"
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
@@ -1008,8 +1106,26 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
+                // Check for multi-step [STEP] markers
+                let hasMultiStep = fullResponseText.contains("[STEP]")
+                var pendingStepLabels: [String] = []
+
+                if hasMultiStep {
+                    // Extract labels from all [POINT:...] tags after [STEP] markers
+                    let steps = fullResponseText.components(separatedBy: "[STEP]")
+                    for step in steps.dropFirst() {
+                        // Parse [POINT:x,y:label] or [POINT:none:label] from each step
+                        let stepParse = Self.parsePointingCoordinates(from: step)
+                        if let label = stepParse.elementLabel, label != "none" {
+                            pendingStepLabels.append(label)
+                        }
+                    }
+                    print("🎯 Multi-step: \(pendingStepLabels.count) pending steps: \(pendingStepLabels)")
+                }
+
+                // Parse the first [POINT:...] tag from Claude's response
+                let firstStep = hasMultiStep ? fullResponseText.components(separatedBy: "[STEP]").first ?? fullResponseText : fullResponseText
+                let parseResult = Self.parsePointingCoordinates(from: firstStep)
                 let spokenText = parseResult.spokenText
 
                 // Handle element pointing if Claude returned coordinates.
@@ -1073,7 +1189,14 @@ final class CompanionManager: ObservableObject {
                         print("🎯 Claude pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(elementLabel)\"")
                     }
 
+                    // Highlight the matched element in the detection overlay
+                    self.highlightedElementLabel = elementLabel
                     ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
+
+                    // Queue remaining steps for multi-step navigation
+                    if !pendingStepLabels.isEmpty {
+                        self.queuePendingSteps(pendingStepLabels)
+                    }
                 } else {
                     print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
                 }
