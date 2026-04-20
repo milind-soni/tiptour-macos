@@ -129,4 +129,54 @@ enum CompanionScreenCaptureUtility {
 
         return capturedScreens
     }
+
+    /// Lightweight capture of the cursor screen as a raw CGImage.
+    /// Skips JPEG encoding — use this for on-device detection where
+    /// you need a CGImage directly (no network transfer).
+    static func capturePrimaryScreenAsCGImage() async throws -> CGImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+
+        guard !content.displays.isEmpty else {
+            throw NSError(domain: "CompanionScreenCapture", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "No display available for capture"])
+        }
+
+        let mouseLocation = NSEvent.mouseLocation
+
+        let ownBundleIdentifier = Bundle.main.bundleIdentifier
+        let ownAppWindows = content.windows.filter { window in
+            window.owningApplication?.bundleIdentifier == ownBundleIdentifier
+        }
+
+        // Find the display the cursor is on
+        var nsScreenByDisplayID: [CGDirectDisplayID: NSScreen] = [:]
+        for screen in NSScreen.screens {
+            if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                nsScreenByDisplayID[screenNumber] = screen
+            }
+        }
+
+        let cursorDisplay = content.displays.first { display in
+            let frame = nsScreenByDisplayID[display.displayID]?.frame ?? display.frame
+            return frame.contains(mouseLocation)
+        } ?? content.displays[0]
+
+        let filter = SCContentFilter(display: cursorDisplay, excludingWindows: ownAppWindows)
+
+        let configuration = SCStreamConfiguration()
+        let maxDimension = 1280
+        let aspectRatio = CGFloat(cursorDisplay.width) / CGFloat(cursorDisplay.height)
+        if cursorDisplay.width >= cursorDisplay.height {
+            configuration.width = maxDimension
+            configuration.height = Int(CGFloat(maxDimension) / aspectRatio)
+        } else {
+            configuration.height = maxDimension
+            configuration.width = Int(CGFloat(maxDimension) * aspectRatio)
+        }
+
+        return try await SCScreenshotManager.captureImage(
+            contentFilter: filter,
+            configuration: configuration
+        )
+    }
 }

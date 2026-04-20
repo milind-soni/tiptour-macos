@@ -12,6 +12,7 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
+    @ObservedObject private var workflowRunner: WorkflowRunner = .shared
     @State private var emailInput: String = ""
 
     var body: some View {
@@ -24,6 +25,13 @@ struct CompanionPanelView: View {
             permissionsCopySection
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
+
+            if let activePlan = workflowRunner.activePlan,
+               !activePlan.steps.isEmpty {
+                Spacer().frame(height: 12)
+                planChecklistSection(plan: activePlan)
+                    .padding(.horizontal, 16)
+            }
 
             if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
                 Spacer()
@@ -168,7 +176,7 @@ struct CompanionPanelView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Hi, I'm Farza. This is TipTour.")
+                Text("Hi, I'm Milind. This is TipTour.")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
@@ -603,9 +611,271 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
     }
 
+    // MARK: - Plan Checklist
+
+    /// Minimal checklist shown while a workflow plan is active. Lists every
+    /// step with the current one highlighted. ClickDetector advances the
+    /// highlight automatically when the user clicks the resolved target;
+    /// the debug toggle at the bottom loosens that to "any click advances"
+    /// for when YOLO/AX resolves wrong and the user still wants to walk
+    /// through the plan.
+    private func planChecklistSection(plan: WorkflowPlan) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(DS.Colors.textTertiary)
+                Text(plan.goal)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(DS.Colors.textPrimary)
+                    .lineLimit(1)
+                Spacer()
+                if let app = plan.app, !app.isEmpty {
+                    Text(app)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(plan.steps.enumerated()), id: \.element.id) { index, step in
+                    planChecklistRow(
+                        step: step,
+                        index: index,
+                        isCurrent: index == workflowRunner.activeStepIndex
+                    )
+                }
+            }
+
+            if let failureLabel = workflowRunner.currentStepResolutionFailureLabel {
+                planResolutionFailurePrompt(failureLabel: failureLabel)
+            }
+
+            Divider()
+                .background(DS.Colors.borderSubtle)
+                .padding(.top, 2)
+
+            planControlsRow
+
+            advanceOnAnyClickDebugToggleRow
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    /// Debug switch that tells ClickDetector to advance on any click
+    /// (not just clicks within the 40pt tolerance of the resolved
+    /// target). Hidden in a subtle "Debug" row so it reads as a power
+    /// user affordance, not a primary UI feature.
+    private var advanceOnAnyClickDebugToggleRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "ladybug")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+            Text("Advance on any click")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { companionManager.advanceOnAnyClickEnabled },
+                set: { companionManager.setAdvanceOnAnyClickEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .tint(DS.Colors.accent)
+            .scaleEffect(0.7)
+        }
+    }
+
+    /// Compact button style used by the plan controls (Stop, Skip, Retry).
+    /// Primary = accent fill; secondary = subtle background so destructive/
+    /// neutral actions read at different weights.
+    private struct PlanControlButtonStyle: ButtonStyle {
+        let isPrimary: Bool
+
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .foregroundColor(isPrimary ? .white : DS.Colors.textSecondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isPrimary
+                              ? DS.Colors.accent.opacity(configuration.isPressed ? 0.7 : 1.0)
+                              : Color.white.opacity(configuration.isPressed ? 0.14 : 0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+                .onHover { isHovering in
+                    if isHovering { NSCursor.pointingHand.push() }
+                    else { NSCursor.pop() }
+                }
+        }
+    }
+
+    private func planChecklistRow(step: WorkflowStep, index: Int, isCurrent: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // Numbered disc — highlighted if current, muted otherwise.
+            Text("\(index + 1)")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(isCurrent ? .white : DS.Colors.textTertiary)
+                .frame(width: 18, height: 18)
+                .background(
+                    Circle().fill(isCurrent ? DS.Colors.accent : Color.white.opacity(0.06))
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(step.label ?? "(unlabeled)")
+                        .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
+                        .foregroundColor(isCurrent ? DS.Colors.textPrimary : DS.Colors.textSecondary)
+                        .lineLimit(1)
+
+                    // Subtle "looking for element..." indicator while the
+                    // resolver is still polling AX/YOLO for this step.
+                    if isCurrent && workflowRunner.isResolvingCurrentStep {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .scaleEffect(0.5)
+                            .frame(width: 12, height: 12)
+                    }
+                }
+                if !step.hint.isEmpty {
+                    Text(step.hint)
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    /// Shown when the current step failed to resolve within the runner's
+    /// budget. Gives the user a clear way out (retry / skip) instead of
+    /// leaving the UI appearing stuck.
+    private func planResolutionFailurePrompt(failureLabel: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.orange)
+
+            Text("Can't find \"\(failureLabel)\"")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+                .lineLimit(1)
+
+            Spacer()
+
+            Button("Retry") {
+                workflowRunner.retryCurrentStep()
+            }
+            .buttonStyle(PlanControlButtonStyle(isPrimary: false))
+
+            Button("Skip") {
+                workflowRunner.skipCurrentStep()
+            }
+            .buttonStyle(PlanControlButtonStyle(isPrimary: true))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.orange.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 0.5)
+        )
+    }
+
+    /// Stop + Skip controls — always visible while a plan is active so
+    /// the user has a clean escape hatch without having to wait for a
+    /// failure prompt or toggle debug settings.
+    private var planControlsRow: some View {
+        HStack(spacing: 8) {
+            Button(role: .destructive) {
+                workflowRunner.stop()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text("Stop")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+            }
+            .buttonStyle(PlanControlButtonStyle(isPrimary: false))
+
+            Spacer()
+
+            Button {
+                workflowRunner.skipCurrentStep()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Skip step")
+                        .font(.system(size: 11, weight: .medium))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+            }
+            .buttonStyle(PlanControlButtonStyle(isPrimary: true))
+        }
+    }
+
     // MARK: - Model Picker
 
     private var modelPickerRow: some View {
+        VStack(spacing: 8) {
+            voiceModePickerRow
+
+            // Only show Claude model options when using the Claude pipeline —
+            // Gemini Live has its own model baked in.
+            if companionManager.voiceMode == .claudeAndElevenLabs {
+                claudeModelPickerRow
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var voiceModePickerRow: some View {
+        HStack {
+            Text("Voice")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+
+            Spacer()
+
+            HStack(spacing: 0) {
+                voiceModeOptionButton(label: "Claude", mode: .claudeAndElevenLabs)
+                voiceModeOptionButton(label: "Gemini Live", mode: .geminiLive)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+        }
+    }
+
+    private var claudeModelPickerRow: some View {
         HStack {
             Text("Model")
                 .font(.system(size: 13, weight: .medium))
@@ -626,7 +896,25 @@ struct CompanionPanelView: View {
                     .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
             )
         }
-        .padding(.vertical, 4)
+    }
+
+    private func voiceModeOptionButton(label: String, mode: CompanionManager.VoiceMode) -> some View {
+        let isSelected = companionManager.voiceMode == mode
+        return Button(action: {
+            companionManager.setVoiceMode(mode)
+        }) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
     }
 
     private func modelOptionButton(label: String, modelID: String) -> some View {
@@ -655,58 +943,45 @@ struct CompanionPanelView: View {
     @State private var isTutorialLoading: Bool = false
 
     private var tutorialSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "play.rectangle.fill")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(DS.Colors.textSecondary)
-                Text("Follow-Along Tutorial")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(DS.Colors.textPrimary)
-            }
-
-            Text("Paste a YouTube tutorial link. TipTour will extract steps, play the video, and guide you through each action.")
-                .font(.system(size: 10))
+        VStack(alignment: .leading, spacing: 10) {
+            Text("YouTube Follow-Along")
+                .font(.system(size: 11, weight: .medium))
                 .foregroundColor(DS.Colors.textTertiary)
-                .lineLimit(3)
 
             HStack(spacing: 6) {
-                TextField("YouTube URL", text: $tutorialURLInput)
+                TextField("Paste YouTube URL", text: $tutorialURLInput)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                     .foregroundColor(DS.Colors.textPrimary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
+                            .fill(DS.Colors.surface2)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
                     )
 
-                Button(action: {
-                    startTutorial()
-                }) {
-                    if isTutorialLoading {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .frame(width: 50)
-                    } else {
-                        Text("Start")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 50)
+                Button(action: { startTutorial() }) {
+                    Group {
+                        if isTutorialLoading {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
                     }
+                    .frame(width: 28, height: 28)
+                    .foregroundColor(tutorialURLInput.isEmpty ? DS.Colors.textTertiary : DS.Colors.textPrimary)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(tutorialURLInput.isEmpty ? DS.Colors.surface2 : DS.Colors.surface3)
+                    )
                 }
                 .buttonStyle(.plain)
-                .padding(.vertical, 6)
-                .padding(.horizontal, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.purple.opacity(0.8))
-                )
                 .pointerCursor()
                 .disabled(tutorialURLInput.isEmpty || isTutorialLoading)
             }
@@ -714,18 +989,9 @@ struct CompanionPanelView: View {
             if !tutorialStatus.isEmpty {
                 Text(tutorialStatus)
                     .font(.system(size: 10))
-                    .foregroundColor(tutorialStatus.contains("Error") ? .red : DS.Colors.textTertiary)
+                    .foregroundColor(tutorialStatus.contains("Error") ? .red.opacity(0.7) : DS.Colors.textTertiary)
             }
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .fill(Color.white.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-        )
     }
 
     private func startTutorial() {
@@ -757,38 +1023,24 @@ struct CompanionPanelView: View {
         }
     }
 
-    // MARK: - DM Farza Button
+    // MARK: - Feedback Button
 
-    private var dmFarzaButton: some View {
+    private var feedbackButton: some View {
         Button(action: {
-            if let url = URL(string: "https://x.com/farzatv") {
+            if let url = URL(string: "https://x.com/milindlabs") {
                 NSWorkspace.shared.open(url)
             }
         }) {
-            HStack(spacing: 8) {
-                Image(systemName: "bubble.left.fill")
-                    .font(.system(size: 12, weight: .medium))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Got feedback? DM me")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("Bugs, ideas, anything — I read every message.")
-                        .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.textTertiary)
-                }
+            HStack(spacing: 5) {
+                Image(systemName: "bubble.left")
+                    .font(.system(size: 10))
+                Text("Feedback")
+                    .font(.system(size: 11))
             }
-            .foregroundColor(DS.Colors.textSecondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
-                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-            )
+            .foregroundColor(DS.Colors.textTertiary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .pointerCursor()
@@ -797,136 +1049,197 @@ struct CompanionPanelView: View {
     // MARK: - Footer
 
     private var footerSection: some View {
-        HStack {
-            Button(action: {
-                NSApp.terminate(nil)
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "power")
-                        .font(.system(size: 11, weight: .medium))
-                    Text("Quit TipTour")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .foregroundColor(DS.Colors.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .pointerCursor()
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                feedbackButton
 
-            if companionManager.hasCompletedOnboarding {
+                #if DEBUG
+                footerButton("Dev", systemImage: "wrench", toggled: showDevTools) {
+                    showDevTools.toggle()
+                }
+                #endif
+
                 Spacer()
 
-                Button(action: {
-                    companionManager.startDemoTutorial()
-                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "play.rectangle.fill")
-                            .font(.system(size: 11, weight: .medium))
-                        Text("Watch Demo Tour")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .foregroundColor(DS.Colors.textTertiary)
+                footerButton("Quit", systemImage: "power") {
+                    NSApp.terminate(nil)
                 }
-                .buttonStyle(.plain)
-                .pointerCursor()
             }
 
             #if DEBUG
-            Spacer().frame(height: 4)
-            devToolsSection
+            if showDevTools {
+                devToolsSection
+                    .padding(.top, 8)
+            }
             #endif
         }
     }
 
-    // MARK: - Dev Tools (DEBUG only)
-
-    #if DEBUG
-    private var devToolsSection: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 3) {
-                dtx("UI", .purple) { Task { await switchModel("ui") } }
-                dtx("Gen", .orange) { Task { await switchModel("general") } }
-                dtx(companionManager.showDetectionOverlay ? "■" : "□", .green) {
-                    companionManager.showDetectionOverlay.toggle()
-                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-                }
-                dtx("Fly", .blue) {
-                    let s = NSScreen.main!
-                    companionManager.detectedElementScreenLocation = CGPoint(x: s.frame.midX, y: s.frame.midY)
-                    companionManager.detectedElementDisplayFrame = s.frame
-                    companionManager.detectedElementBubbleText = "Test"
-                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-                }
-                dtx("✕", .red) {
-                    companionManager.clearDetectedElementLocation()
-                    companionManager.onboardingPromptText = ""
-                    companionManager.onboardingPromptOpacity = 0.0
-                    companionManager.showOnboardingPrompt = false
-                    companionManager.stopTutorial()
-                }
-            }
-            HStack(spacing: 3) {
-                dtx("▶", .green) {
-                    companionManager.startDemoTutorial()
-                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-                }
-                dtx("⏭", .green) { companionManager.advanceTutorial() }
-                dtx("⌨", .cyan) {
-                    companionManager.isTutorialActive = true
-                    companionManager.tutorialActionType = "keyboard"
-                    companionManager.tutorialKeyLabel = "G"
-                    companionManager.onboardingPromptText = "Press G"
-                    companionManager.onboardingPromptOpacity = 1.0
-                    companionManager.showOnboardingPrompt = true
-                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-                }
-                dtx("↕", .cyan) {
-                    companionManager.isTutorialActive = true
-                    companionManager.tutorialActionType = "scroll"
-                    companionManager.onboardingPromptText = "Scroll"
-                    companionManager.onboardingPromptOpacity = 1.0
-                    companionManager.showOnboardingPrompt = true
-                    NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
-                }
-                dtx("🔇", .yellow) { companionManager.onboardingVideoPlayer?.isMuted.toggle() }
-            }
-        }
-        .padding(6)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.white.opacity(0.03))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
-                )
-        )
-    }
-
-    private func dtx(_ label: String, _ color: Color, action: @escaping () -> Void) -> some View {
+    private func footerButton(
+        _ title: String,
+        systemImage: String,
+        toggled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
-            Text(label)
-                .font(.system(size: 10))
-                .frame(height: 22)
-                .padding(.horizontal, 8)
-                .foregroundColor(color)
-                .background(RoundedRectangle(cornerRadius: 4).fill(color.opacity(0.1)))
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10))
+                Text(title)
+                    .font(.system(size: 11))
+            }
+            .foregroundColor(toggled ? DS.Colors.textSecondary : DS.Colors.textTertiary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .pointerCursor()
     }
 
-    private func switchModel(_ modelId: String) async {
-        guard let url = URL(string: "http://localhost:8765/switch") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["model": modelId])
-        _ = try? await URLSession.shared.data(for: request)
-        print("[Dev] Switched to: \(modelId)")
+    // MARK: - Dev Tools (DEBUG only)
+
+    #if DEBUG
+    @State private var showDevTools: Bool = false
+
+    private var devToolsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            devToolRow("Detection Overlay", systemImage: "square.grid.3x3") {
+                companionManager.showDetectionOverlay.toggle()
+                if companionManager.showDetectionOverlay {
+                    companionManager.startDetectionOverlayFeeding()
+                } else {
+                    NativeElementDetector.shared.stopLiveFeeding()
+                }
+                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            } trailing: {
+                Text(companionManager.showDetectionOverlay ? "On" : "Off")
+                    .foregroundColor(companionManager.showDetectionOverlay ? DS.Colors.textSecondary : DS.Colors.textTertiary)
+            }
+
+            devToolRow("Test Cursor Flight", systemImage: "arrow.up.right") {
+                let s = NSScreen.main!
+                companionManager.detectedElementScreenLocation = CGPoint(x: s.frame.midX, y: s.frame.midY)
+                companionManager.detectedElementDisplayFrame = s.frame
+                companionManager.detectedElementBubbleText = "Test"
+                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            }
+
+            devToolRow("Start Demo Tutorial", systemImage: "play") {
+                companionManager.startDemoTutorial()
+                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            }
+
+            devToolRow("Advance Step", systemImage: "forward") {
+                companionManager.advanceTutorial()
+            }
+
+            devToolRow("Test Keyboard Overlay", systemImage: "keyboard") {
+                companionManager.isTutorialActive = true
+                companionManager.tutorialActionType = "keyboard"
+                companionManager.tutorialKeyLabel = "G"
+                companionManager.onboardingPromptText = "Press G"
+                companionManager.onboardingPromptOpacity = 1.0
+                companionManager.showOnboardingPrompt = true
+                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            }
+
+            devToolRow("Test Scroll Overlay", systemImage: "arrow.up.arrow.down") {
+                companionManager.isTutorialActive = true
+                companionManager.tutorialActionType = "scroll"
+                companionManager.onboardingPromptText = "Scroll"
+                companionManager.onboardingPromptOpacity = 1.0
+                companionManager.showOnboardingPrompt = true
+                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            }
+
+            devToolRow("Toggle Mute Video", systemImage: "speaker.slash") {
+                companionManager.onboardingVideoPlayer?.isMuted.toggle()
+            }
+
+            devToolDivider
+
+            devToolRow("Reset All", systemImage: "xmark.circle", destructive: true) {
+                companionManager.clearDetectedElementLocation()
+                companionManager.onboardingPromptText = ""
+                companionManager.onboardingPromptOpacity = 0.0
+                companionManager.showOnboardingPrompt = false
+                companionManager.stopTutorial()
+            }
+        }
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(DS.Colors.surface1)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+        )
     }
+
+    private var devToolDivider: some View {
+        Rectangle()
+            .fill(DS.Colors.borderSubtle)
+            .frame(height: 0.5)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+    }
+
+    private func devToolRow(
+        _ title: String,
+        systemImage: String,
+        destructive: Bool = false,
+        action: @escaping () -> Void,
+        @ViewBuilder trailing: () -> some View = { EmptyView() }
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11))
+                    .foregroundColor(destructive ? .red.opacity(0.7) : DS.Colors.textTertiary)
+                    .frame(width: 16)
+
+                Text(title)
+                    .font(.system(size: 12))
+                    .foregroundColor(destructive ? .red.opacity(0.7) : DS.Colors.textSecondary)
+
+                Spacer()
+
+                trailing()
+                    .font(.system(size: 11))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(DevToolRowButtonStyle())
+        .pointerCursor()
+    }
+
     #endif
 
     // MARK: - Visual Helpers
+
+    #if DEBUG
+    /// macOS-native menu row hover style — subtle background highlight on hover.
+    private struct DevToolRowButtonStyle: ButtonStyle {
+        @State private var isHovered = false
+
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(configuration.isPressed
+                              ? DS.Colors.surface4
+                              : isHovered ? DS.Colors.surface3 : Color.clear)
+                )
+                .onHover { isHovered = $0 }
+        }
+    }
+    #endif
+
+    // MARK: -
 
     private var panelBackground: some View {
         RoundedRectangle(cornerRadius: 12, style: .continuous)

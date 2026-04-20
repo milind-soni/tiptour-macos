@@ -54,7 +54,7 @@ final class CompanionManager: ObservableObject {
     @Published var tutorialActionType: String = ""
     /// Show YOLO detection boxes overlay — toggle from dev tools
     @Published var showDetectionOverlay: Bool = false
-    /// Latest detected elements from OmniParser for overlay rendering
+    /// Latest detected elements from native detector for overlay rendering
     @Published var detectedElements: [[String: Any]] = []
     /// Image size of the screenshot used for detection (for coordinate scaling)
     @Published var detectedImageSize: [Int] = [1512, 982]
@@ -131,62 +131,49 @@ final class CompanionManager: ObservableObject {
 
     /// Load and start the pre-built demo tutorial
     func startDemoTutorial() {
-        // Load demo guide from the demo folder
-        let demoPath = Bundle.main.path(forResource: "demo-guide", ofType: "json")
-            ?? (FileManager.default.currentDirectoryPath + "/demo/demo-guide.json")
-
-        // Try multiple paths
-        let paths = [
-            demoPath,
-            NSHomeDirectory() + "/Documents/mywork/tiptour-macos/demo/demo-guide.json"
-        ]
-
-        for path in paths {
-            guard FileManager.default.fileExists(atPath: path),
-                  let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-                  let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                continue
-            }
-
-            let title = raw["title"] as? String ?? "Demo"
-            let app = raw["app"] as? String ?? "Blender"
-            let rawSteps = raw["steps"] as? [[String: Any]] ?? []
-
-            let steps: [TutorialStep] = rawSteps.enumerated().map { i, dict in
-                TutorialStep(
-                    id: "step-\(i+1)",
-                    timestamp: dict["timestamp"] as? Double ?? 0,
-                    action: dict["action"] as? String ?? "click",
-                    element: dict["element"] as? String ?? "",
-                    elementRole: dict["element_role"] as? String,
-                    hint: dict["hint"] as? String ?? "",
-                    narration: dict["narration"] as? String
-                )
-            }
-
-            let guide = TutorialGuide(title: title, app: app, steps: steps, videoURL: "https://www.youtube.com/watch?v=peSv5IT5Ve4")
-
-            // Download video if not cached
-            let videoID = "peSv5IT5Ve4"
-            let videoPath = NSTemporaryDirectory() + "tiptour-\(videoID).mp4"
-
-            if FileManager.default.fileExists(atPath: videoPath) {
-                startTutorial(guide: guide, videoPath: videoPath)
-            } else {
-                // Download in background, start without video for now
-                startTutorial(guide: guide, videoPath: nil)
-                Task {
-                    if let path = try? await TutorialGuideGenerator.downloadVideoPublic(videoID: videoID) {
-                        print("[Demo] Video downloaded: \(path)")
-                    }
-                }
-            }
-
-            print("[Demo] Loaded \(steps.count) steps from \(path)")
+        // Load demo guide from app bundle
+        guard let bundlePath = Bundle.main.path(forResource: "demo-guide", ofType: "json"),
+              let data = try? Data(contentsOf: URL(fileURLWithPath: bundlePath)),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            print("[Tutorial] demo-guide.json not found in bundle")
             return
         }
 
-        print("[Demo] Could not find demo-guide.json")
+        let title = raw["title"] as? String ?? "Demo"
+        let app = raw["app"] as? String ?? "Blender"
+        let rawSteps = raw["steps"] as? [[String: Any]] ?? []
+
+        let steps: [TutorialStep] = rawSteps.enumerated().map { i, dict in
+            TutorialStep(
+                id: "step-\(i+1)",
+                timestamp: dict["timestamp"] as? Double ?? 0,
+                action: dict["action"] as? String ?? "click",
+                element: dict["element"] as? String ?? "",
+                elementRole: dict["element_role"] as? String,
+                hint: dict["hint"] as? String ?? "",
+                narration: dict["narration"] as? String
+            )
+        }
+
+        let guide = TutorialGuide(title: title, app: app, steps: steps, videoURL: "https://www.youtube.com/watch?v=peSv5IT5Ve4")
+
+        // Download video if not cached
+        let videoID = "peSv5IT5Ve4"
+        let videoPath = NSTemporaryDirectory() + "tiptour-\(videoID).mp4"
+
+        if FileManager.default.fileExists(atPath: videoPath) {
+            startTutorial(guide: guide, videoPath: videoPath)
+        } else {
+            // Download in background, start without video for now
+            startTutorial(guide: guide, videoPath: nil)
+            Task {
+                if let downloadedPath = try? await TutorialGuideGenerator.downloadVideoPublic(videoID: videoID) {
+                    print("[Demo] Video downloaded: \(downloadedPath)")
+                }
+            }
+        }
+
+        print("[Demo] Loaded \(steps.count) steps")
     }
 
     func stopTutorial() {
@@ -295,7 +282,7 @@ final class CompanionManager: ObservableObject {
         return el.replacingOccurrences(of: " key", with: "")
     }
 
-    /// Takes a screenshot, finds the element via OmniParser (local) or Claude (fallback).
+    /// Takes a screenshot, finds the element via native detector (local) or Claude (fallback).
     private func pointCursorForStep(_ step: TutorialStep) async {
         guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else {
             print("[Tutorial] Screenshot failed")
@@ -303,18 +290,21 @@ final class CompanionManager: ObservableObject {
         }
 
         guard let primary = screenshots.first else { return }
-        let base64Image = primary.imageData.base64EncodedString()
 
-        // Try OmniParser first (local, fast, no API cost)
-        if let found = await OmniParserClient.shared.findElement(query: step.element, imageBase64: base64Image) {
-            print("[Tutorial] OmniParser found \"\(found.label)\" at (\(Int(found.center.x)),\(Int(found.center.y)))")
+        // Try native detector first (on-device, fast, no API cost)
+        if let cgImage = Self.cgImage(from: primary.imageData),
+           let found = await NativeElementDetector.shared.findElement(query: step.element, in: cgImage) {
+            print("[Tutorial] NativeDetector found \"\(found.label)\" at (\(Int(found.center.x)),\(Int(found.center.y)))")
             await MainActor.run {
                 self.pointAtScreenPixel(found.center, capture: primary, label: step.element)
             }
             return
         }
 
-        print("[Tutorial] OmniParser miss — falling back to Claude")
+        print("[Tutorial] NativeDetector miss — falling back to Gemma")
+
+        // Gemma needs base64 for its vision API
+        let base64Image = primary.imageData.base64EncodedString()
 
         // Fallback: Gemma 4 via OpenRouter (fast, vision-capable)
         let tutorialContext = activeTutorial.map { "Tutorial: \($0.title) in \($0.app)" } ?? ""
@@ -322,7 +312,7 @@ final class CompanionManager: ObservableObject {
             "model": "google/gemma-4-31b-it",
             "max_tokens": 200,
             "messages": [
-                ["role": "system", "content": "You see a screenshot of a macOS app (\(primary.label)). \(tutorialContext). Reply with ONLY [POINT:x,y:\(step.element)] with pixel coordinates from top-left. If not visible, reply [POINT:none]."],
+                ["role": "system", "content": "You see a screenshot of a macOS app (\(primary.label)). \(tutorialContext). Reply with ONLY [POINT:\(step.element)] — the app has on-device element detection that will locate the element by name. Do NOT guess coordinates. If the element isn't visible, reply [POINT:none]."],
                 ["role": "user", "content": [
                     ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]],
                     ["type": "text", "text": "\(step.action) \"\(step.element)\". Point at it."]
@@ -393,19 +383,18 @@ final class CompanionManager: ObservableObject {
         let nextLabel = pendingLiveSteps.removeFirst()
         print("🎯 Live step: finding \"\(nextLabel)\"...")
 
-        // Take a fresh screenshot and try OmniParser
+        // Take a fresh screenshot and try native detector
         guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(),
               let primary = screenshots.first else { return }
 
-        let base64Image = primary.imageData.base64EncodedString()
-
-        // Try OmniParser cache first, then full scan
-        if let found = await OmniParserClient.shared.findFromCache(query: nextLabel) {
+        // Try native detector cache first, then full scan
+        if let found = NativeElementDetector.shared.findFromCache(query: nextLabel) {
             print("🎯 Live step: cache hit \"\(nextLabel)\" at (\(Int(found.center.x)),\(Int(found.center.y)))")
             await MainActor.run {
                 self.pointAtScreenPixel(found.center, capture: primary, label: nextLabel)
             }
-        } else if let found = await OmniParserClient.shared.findElement(query: nextLabel, imageBase64: base64Image) {
+        } else if let cgImage = Self.cgImage(from: primary.imageData),
+                  let found = await NativeElementDetector.shared.findElement(query: nextLabel, in: cgImage) {
             print("🎯 Live step: found \"\(nextLabel)\" at (\(Int(found.center.x)),\(Int(found.center.y)))")
             await MainActor.run {
                 self.pointAtScreenPixel(found.center, capture: primary, label: nextLabel)
@@ -447,6 +436,14 @@ final class CompanionManager: ObservableObject {
         detectedElementDisplayFrame = displayFrame
         detectedElementBubbleText = label
         print("[Tutorial] → screen(\(Int(globalLocation.x)),\(Int(globalLocation.y)))")
+    }
+
+    /// Fly the cursor to a resolved element. The Resolution already contains
+    /// global AppKit coordinates — no further conversion needed.
+    private func pointAtResolution(_ resolution: ElementResolver.Resolution) {
+        detectedElementScreenLocation = resolution.globalScreenPoint
+        detectedElementDisplayFrame = resolution.displayFrame
+        detectedElementBubbleText = resolution.label
     }
 
     private func setupTutorialTimeObserver(player: AVPlayer) {
@@ -545,6 +542,226 @@ final class CompanionManager: ObservableObject {
     /// The Claude model used for voice responses. Persisted to UserDefaults.
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-haiku-4-5-20251001"
 
+    /// Which voice pipeline to use — the legacy STT→Claude→TTS chain or the
+    /// new single-model Gemini Live realtime WebSocket.
+    enum VoiceMode: String {
+        case claudeAndElevenLabs   // Apple Speech STT → Claude → ElevenLabs TTS (legacy)
+        case geminiLive            // Single Gemini Live WebSocket (voice + vision + voice)
+    }
+
+    @Published var voiceMode: VoiceMode = VoiceMode(rawValue: UserDefaults.standard.string(forKey: "voiceMode") ?? "") ?? .claudeAndElevenLabs
+
+    func setVoiceMode(_ mode: VoiceMode) {
+        voiceMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "voiceMode")
+        // Tear down any active Gemini session when switching away from it
+        if mode != .geminiLive {
+            geminiLiveSession.stop()
+        }
+    }
+
+    /// Lazily-built Gemini Live session. Active only when voiceMode is .geminiLive.
+    lazy var geminiLiveSession: GeminiLiveSession = {
+        let session = GeminiLiveSession(
+            apiKeyURL: "\(Self.workerBaseURL)/gemini-live-key",
+            systemPrompt: Self.companionVoiceResponseSystemPrompt
+        )
+        // Tool-call handlers. Gemini Live decides per-utterance whether
+        // the request is a single-element point or a multi-step workflow.
+        // Fast path (simple): point_at_element → local AX + YOLO resolve.
+        // Smart path (complex): create_workflow → Gemini Flash planner.
+        session.onPointAtElement = { [weak self] label, screenshotJPEG in
+            await self?.handleToolPointAtElement(label: label, screenshotJPEG: screenshotJPEG) ?? ["ok": false]
+        }
+        session.onSubmitWorkflowPlan = { [weak self] goal, app, steps in
+            await self?.handleToolSubmitWorkflowPlan(goal: goal, app: app, steps: steps) ?? ["ok": false]
+        }
+
+        // Legacy transcript-tag parsing stays in place as a fallback if a
+        // build of Gemini skips tools and falls back to [POINT:] markup.
+        session.onOutputTranscript = { [weak self] fullTranscript in
+            self?.handleGeminiTranscriptUpdate(fullTranscript)
+        }
+        session.onTurnComplete = { [weak self] in
+            self?.lastGeminiTranscriptLength = 0
+            self?.planAppliedThisTurn = false
+        }
+        session.onError = { error in
+            print("[GeminiLive] Error: \(error.localizedDescription)")
+        }
+        return session
+    }()
+
+    // MARK: - Tool Handlers
+
+    /// Handle the `point_at_element` tool call. Resolves the label via the
+    /// AX tree → YOLO + OCR cascade, flies the cursor there, and returns a
+    /// short dictionary describing the outcome so Gemini can narrate with
+    /// confidence (e.g. "there it is on the top-right").
+    @MainActor
+    private func handleToolPointAtElement(label: String, screenshotJPEG: Data?) async -> [String: Any] {
+        print("[Tool] 🔧 point_at_element(label=\"\(label)\")")
+        let startedAt = Date()
+        planAppliedThisTurn = true
+        let capture = geminiLiveSession.latestCapture
+        let resolution = await ElementResolver.shared.resolve(
+            label: label,
+            llmHintInScreenshotPixels: nil,
+            latestCapture: capture
+        )
+        let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+        guard let resolution else {
+            print("[Tool] ✗ point_at_element(\"\(label)\") → no match after \(elapsed)ms")
+            return ["ok": false, "reason": "element_not_found", "label": label]
+        }
+        print("[Tool] ✓ point_at_element(\"\(label)\") → \(resolution.label) via \(resolution.source) in \(elapsed)ms")
+        pointAtResolution(resolution)
+        return [
+            "ok": true,
+            "label": resolution.label,
+            "source": String(describing: resolution.source)
+        ]
+    }
+
+    /// Handle the `submit_workflow_plan` tool call. Gemini produces the
+    /// plan itself via its own vision + reasoning, so this is just a
+    /// conversion from the raw tool args into a WorkflowPlan + kickoff
+    /// of the runner. No separate planner round-trip, no OpenRouter,
+    /// no /plan endpoint, no 3-6s wait.
+    @MainActor
+    private func handleToolSubmitWorkflowPlan(goal: String, app: String, steps: [[String: Any]]) async -> [String: Any] {
+        print("[Tool] 🔧 submit_workflow_plan(goal=\"\(goal)\", app=\"\(app)\", \(steps.count) steps)")
+        planAppliedThisTurn = true
+
+        let parsedSteps: [WorkflowStep] = steps.enumerated().map { index, raw in
+            let label = raw["label"] as? String
+            let hint = raw["hint"] as? String ?? ""
+            let x = raw["x"] as? Int
+            let y = raw["y"] as? Int
+            return WorkflowStep(
+                id: "step_\(index + 1)",
+                type: .click,
+                label: label,
+                hint: hint,
+                hintX: x,
+                hintY: y,
+                screenNumber: nil
+            )
+        }
+
+        guard !parsedSteps.isEmpty else {
+            print("[Tool] ✗ submit_workflow_plan — zero steps")
+            return ["ok": false, "reason": "empty_steps"]
+        }
+
+        let plan = WorkflowPlan(
+            goal: goal,
+            app: app.isEmpty ? nil : app,
+            steps: parsedSteps
+        )
+        let stepLabels = parsedSteps.map { $0.label ?? "<unlabeled>" }
+        print("[Tool] ✓ submit_workflow_plan → \(plan.app ?? "?"): \(stepLabels)")
+        startWorkflowPlan(plan)
+
+        // Pause mic + screenshots so Gemini can narrate the plan in one
+        // uninterrupted turn. Once the narration finishes we EXIT
+        // narration mode — resuming mic + screenshots — but the
+        // WebSocket stays open. That way the user can ask a follow-up
+        // ("and how do I save it as Swift?") and Gemini still has the
+        // conversational memory of the plan it just described. Session
+        // only really closes when the user hotkey-toggles it off.
+        print("[Workflow] entering Gemini narration mode — mic/screenshots paused, socket kept alive for narration")
+        geminiLiveSession.enterNarrationMode()
+        scheduleExitNarrationModeAfterSpeechEnds()
+
+        return [
+            "ok": true,
+            "accepted_steps": stepLabels.count
+        ]
+    }
+
+    /// Wait for Gemini's post-tool narration turn to finish, then exit
+    /// narration mode so the mic + periodic screenshots resume. Session
+    /// stays open for conversational follow-ups.
+    ///
+    /// Three ways this can complete:
+    ///   - Speech observed and then quiet for 800ms continuously → exit.
+    ///   - Gemini never spoke at all within the `silentNarrationGraceSeconds`
+    ///     window → exit immediately (don't strand the user muted while
+    ///     we wait forever for speech that isn't coming).
+    ///   - Hard ceiling of `maxTotalWaitSeconds` regardless → exit.
+    private func scheduleExitNarrationModeAfterSpeechEnds() {
+        // If Gemini hasn't started speaking by this point, assume it
+        // doesn't intend to narrate this turn and resume mic right away.
+        // Keeps the "stops listening" feeling from happening.
+        let silentNarrationGraceSeconds: TimeInterval = 3.0
+        // After speech has finished, this much continuous quiet means
+        // the turn is really over (not mid-sentence pause).
+        let quietConfirmationSeconds: TimeInterval = 0.8
+        // Absolute maximum we'll keep mic paused, even for a wordy turn.
+        let maxTotalWaitSeconds: TimeInterval = 15.0
+
+        Task { [weak self] in
+            guard let self = self else { return }
+
+            let startedAt = Date()
+            let maxDeadline = startedAt.addingTimeInterval(maxTotalWaitSeconds)
+            var hasObservedSpeechStart = false
+            var quietSinceTimestamp: Date?
+
+            while Date() < maxDeadline {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+
+                let (isActive, speaking, playing) = await MainActor.run { () -> (Bool, Bool, Bool) in
+                    (
+                        self.geminiLiveSession.isActive,
+                        self.geminiLiveSession.isModelSpeaking,
+                        self.geminiLiveSession.isAudioPlaying
+                    )
+                }
+                if !isActive { return }
+
+                let currentlySpeaking = speaking || playing
+                if currentlySpeaking {
+                    hasObservedSpeechStart = true
+                    quietSinceTimestamp = nil
+                    continue
+                }
+
+                // Gemini hasn't said anything yet and the grace window
+                // is up — exit narration mode so the user isn't stuck
+                // with the mic paused.
+                if !hasObservedSpeechStart,
+                   Date().timeIntervalSince(startedAt) >= silentNarrationGraceSeconds {
+                    break
+                }
+
+                // Speech happened and is now over — confirm it stays
+                // quiet for a beat so we don't cut off a mid-sentence pause.
+                if hasObservedSpeechStart {
+                    if quietSinceTimestamp == nil {
+                        quietSinceTimestamp = Date()
+                    } else if let quietStart = quietSinceTimestamp,
+                              Date().timeIntervalSince(quietStart) >= quietConfirmationSeconds {
+                        break
+                    }
+                }
+            }
+
+            await MainActor.run {
+                guard self.geminiLiveSession.isActive else { return }
+                print("[Workflow] narration window closed — exiting narration mode, session stays alive for follow-ups")
+                self.geminiLiveSession.exitNarrationMode()
+                self.planAppliedThisTurn = false
+            }
+        }
+    }
+
+    /// Track whether a plan has already been applied this turn so the
+    /// transcript-tag path doesn't overwrite it with a stale [POINT:].
+    private var planAppliedThisTurn: Bool = false
+
+
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedClaudeModel")
@@ -557,6 +774,22 @@ final class CompanionManager: ObservableObject {
     @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
         ? true
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
+
+    /// Debug flag for the workflow checklist: when true, ClickDetector
+    /// advances on ANY click instead of requiring the click to land
+    /// within 40pt of the resolved target. Lets the user progress
+    /// through a plan even when YOLO/AX resolves wrong. Persisted so
+    /// testing sessions survive app restarts.
+    @Published var advanceOnAnyClickEnabled: Bool = UserDefaults.standard.bool(forKey: "advanceOnAnyClickEnabled") {
+        didSet {
+            ClickDetector.advanceOnAnyClickEnabled = advanceOnAnyClickEnabled
+        }
+    }
+
+    func setAdvanceOnAnyClickEnabled(_ enabled: Bool) {
+        advanceOnAnyClickEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "advanceOnAnyClickEnabled")
+    }
 
     func setClickyCursorEnabled(_ enabled: Bool) {
         isClickyCursorEnabled = enabled
@@ -614,12 +847,17 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        // Push the persisted debug flag into ClickDetector — the
+        // @Published didSet only fires on assignment, so the initial
+        // load from UserDefaults needs to be copied across manually.
+        ClickDetector.advanceOnAnyClickEnabled = advanceOnAnyClickEnabled
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
 
-        // Start OmniParser live feeding — keeps element cache warm
-        startOmniParserLiveFeeding()
+        // Detection runs on-demand (hotkey press, tutorials, pointing) — not in background.
+        // Background live feeding was causing cursor jank from ScreenCaptureKit + CoreML
+        // contending with the 60fps cursor tracking timer on the main thread.
 
         // If the user already completed onboarding AND all permissions are
         // still granted, show the cursor overlay immediately. If permissions
@@ -858,11 +1096,35 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    /// Audio power cancellable for the Gemini Live session (separate from
+    /// the dictation manager's stream since they're independent audio engines).
+    private var geminiAudioPowerCancellable: AnyCancellable?
+    private var geminiModelSpeakingCancellable: AnyCancellable?
+
     private func bindAudioPowerLevel() {
         audioPowerCancellable = buddyDictationManager.$currentAudioPowerLevel
             .receive(on: DispatchQueue.main)
             .sink { [weak self] powerLevel in
+                // Ignore dictation's power in Gemini mode — the Gemini session
+                // publishes its own level from a separate audio engine.
+                guard self?.voiceMode != .geminiLive else { return }
                 self?.currentAudioPowerLevel = powerLevel
+            }
+
+        geminiAudioPowerCancellable = geminiLiveSession.$currentAudioPowerLevel
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] powerLevel in
+                guard self?.voiceMode == .geminiLive else { return }
+                self?.currentAudioPowerLevel = powerLevel
+            }
+
+        // When Gemini finishes its turn, drop back to .listening so the
+        // waveform stays visible while the user decides what to say next.
+        geminiModelSpeakingCancellable = geminiLiveSession.$isModelSpeaking
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isSpeaking in
+                guard let self = self, self.voiceMode == .geminiLive, self.geminiLiveSession.isActive else { return }
+                self.voiceState = isSpeaking ? .responding : .listening
             }
     }
 
@@ -900,42 +1162,28 @@ final class CompanionManager: ObservableObject {
             }
     }
 
-    /// Start feeding screenshots to OmniParser every 1.5s for live element detection
-    private func startOmniParserLiveFeeding() {
-        OmniParserClient.shared.startLiveFeeding(interval: 1.5) { [weak self] in
-            guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else { return nil }
-            guard let primary = screenshots.first else { return nil }
-            let b64 = primary.imageData.base64EncodedString()
+    /// Start live feeding for the detection overlay debug tool.
+    /// Only runs while the overlay toggle is on — stops when toggled off.
+    func startDetectionOverlayFeeding() {
+        NativeElementDetector.shared.startLiveFeeding(interval: 1.5) { [weak self] in
+            guard let cgImage = try? await CompanionScreenCaptureUtility.capturePrimaryScreenAsCGImage() else { return nil }
 
-            // If detection overlay is on, fetch full element list for rendering
-            if self?.showDetectionOverlay == true {
-                Task {
-                    await self?.fetchDetectedElements(imageBase64: b64)
-                }
+            Task {
+                await self?.updateDetectionOverlay()
             }
 
-            return b64
+            return cgImage
         }
     }
 
-    /// Fetch all detected elements from OmniParser for overlay rendering
-    private func fetchDetectedElements(imageBase64: String) async {
-        guard let url = URL(string: "http://localhost:8765/cache") else { return }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 3
+    /// Fetch all detected elements from native detector for overlay rendering
+    private func updateDetectionOverlay() async {
+        let cached = NativeElementDetector.shared.getCachedElements()
 
-        do {
-            let (data, _) = try await URLSession.shared.data(for: request)
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let elements = json["elements"] as? [[String: Any]] else { return }
-
-            let imgSize = json["image_size"] as? [Int] ?? [1512, 982]
-
-            await MainActor.run {
-                self.detectedElements = elements
-                self.detectedImageSize = imgSize
-            }
-        } catch {}
+        await MainActor.run {
+            self.detectedElements = cached.elements
+            self.detectedImageSize = cached.imageSize
+        }
     }
 
     private func bindShortcutTransitions() {
@@ -950,6 +1198,16 @@ final class CompanionManager: ObservableObject {
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
         switch transition {
         case .pressed:
+            // Snapshot the user's real frontmost app BEFORE opening the
+            // menu bar panel or cursor overlay. Once Clicky shows any UI
+            // macOS may flip frontmost to us, so this is the only reliable
+            // moment to capture which app the user was actually looking at.
+            if let frontmost = NSWorkspace.shared.frontmostApplication,
+               frontmost.bundleIdentifier != Bundle.main.bundleIdentifier {
+                AccessibilityTreeResolver.userTargetAppOverride = frontmost
+                print("[Target] user's app at hotkey press: \(frontmost.bundleIdentifier ?? "?") (\(frontmost.localizedName ?? "?"))")
+            }
+
             // If a tutorial is active, advance to next step instead of dictation
             if isTutorialActive {
                 advanceTutorial()
@@ -989,6 +1247,28 @@ final class CompanionManager: ObservableObject {
 
             ClickyAnalytics.trackPushToTalkStarted()
 
+            // Gemini Live uses TOGGLE behavior, not hold-to-talk. The connection
+            // stays open across turns so the user can have a real conversation —
+            // talk naturally, pause, hear Gemini respond, interrupt, etc. Press
+            // hotkey once to start, press again to end.
+            if voiceMode == .geminiLive {
+                if geminiLiveSession.isActive {
+                    stopGeminiLiveSession()
+                    voiceState = .idle
+                } else {
+                    startGeminiLiveSession()
+                    voiceState = .listening
+                }
+                return
+            }
+
+            // Warm AX tree + YOLO cache for the current app RIGHT NOW —
+            // in parallel with dictation startup. By the time the user
+            // finishes speaking and Claude responds, everything's hot.
+            Task.detached(priority: .userInitiated) {
+                await Self.warmLocalResolvers()
+            }
+
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = Task {
                 await buddyDictationManager.startPushToTalkFromKeyboardShortcut(
@@ -1010,6 +1290,13 @@ final class CompanionManager: ObservableObject {
             // Without this, a quick press-and-release drops the release event and
             // leaves the waveform overlay stuck on screen indefinitely.
             ClickyAnalytics.trackPushToTalkReleased()
+
+            // In Gemini Live mode release is a no-op — the session is toggled
+            // by hotkey PRESS, not by press/release.
+            if voiceMode == .geminiLive {
+                return
+            }
+
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
@@ -1037,27 +1324,53 @@ final class CompanionManager: ObservableObject {
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
 
-    element pointing:
-    you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
+    element pointing via tools (VERY IMPORTANT — read carefully):
 
-    don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
+    you have exactly TWO tools. call AT MOST ONE tool per turn. do NOT narrate before the tool call. call it silently, wait for the response, THEN speak ONCE.
 
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+    TOOL: point_at_element(label)
+      use for a SINGLE visible element. examples: "where's the save button", "point at the color inspector", "what is this tab".
+      label = literal visible text on screen.
 
-    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
+    TOOL: submit_workflow_plan(goal, app, steps)
+      use for ANYTHING that requires more than one click, including:
+        - opening a menu then picking an item ("how do I save" → File → Save)
+        - navigating through panels or tabs
+        - ANY "how do I X" / "walk me through" / "show me how to" / "teach me" question
+      produce the FULL plan yourself — you see the screenshot, you know the user's request, you know the app. you DO NOT need an external planner. emit every step in order.
+      arguments:
+        goal  = short summary of the user's intent ("create a new file", "render an animation").
+        app   = exact foreground app name visible in the screenshot ("Blender", "Xcode", "GarageBand"). never "macOS" or "unknown".
+        steps = ordered array of {label, hint, x?, y?}. first step MUST be visible on the current screen. subsequent steps describe the path to take after clicking step 1; x/y optional on those. include x,y on step 1 only when the app lacks accessibility support (Blender, games, canvas tools).
 
-    MULTI-STEP NAVIGATION: for nested actions like "how to undo" that require opening a menu first, use multiple [POINT:] tags with [STEP] between them. the cursor will fly to each one in sequence, waiting for the user to click before moving to the next.
+    ABSOLUTE RULES:
+    - exactly ONE tool call per turn. never both tools, never the same tool twice.
+    - NO narration before the tool. call silently, get the response, THEN speak.
+    - single visible element → point_at_element.
+    - anything needing a sequence → submit_workflow_plan.
+    - no UI involvement (pure knowledge or chit-chat) → no tool, just speak.
 
-    format for multi-step: spoken text [POINT:x,y:first element] [STEP] [POINT:x,y:second element]
-
-    if pointing wouldn't help, append [POINT:none].
+    after submit_workflow_plan returns, narrate the full plan out loud in ONE natural-sounding turn. one to two short sentences total. describe the sequence the user will follow. do NOT pause between steps, do NOT wait for anything — speak the whole thing uninterrupted and then stop. the cursor and checklist handle per-step timing independently; your job is the voice-over, not the sync.
+      example: "click File, then New, then File..."
+      example: "open the Render menu and pick Render Animation."
 
     examples:
-    - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
-    - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
-    - user asks how to commit in xcode: "see that source control menu up top? click that and hit commit, or you can use command option c as a shortcut. [POINT:285,11:source control]"
-    - user asks how to undo: "click the edit menu, then hit undo. [POINT:175,11:edit menu] [STEP] [POINT:none:undo]"
-    - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
+
+    user: "where's the File menu"
+      → point_at_element(label: "File")
+      → speak: "right at the top left"
+
+    user: "how do I create a new file in Xcode"
+      → submit_workflow_plan(goal: "create a new file", app: "Xcode",
+           steps: [{label:"File", hint:"Open the File menu"},
+                   {label:"New", hint:"Pick New"},
+                   {label:"File...", hint:"Choose File..."}])
+      → speak: "here's how to create a new file."
+      (then later, per-step NARRATE: messages arrive one at a time)
+
+    user: "what is HTML"
+      → no tool
+      → speak your answer
     """
 
     // MARK: - AI Response Pipeline
@@ -1078,6 +1391,17 @@ final class CompanionManager: ObservableObject {
             do {
                 // Capture all connected screens so the AI has full context
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+
+                // Run on-device detection on the primary screen so the cache
+                // is warm for any [POINT:] tags Claude returns, and the
+                // detection overlay (if toggled on) gets populated.
+                if let primaryCapture = screenCaptures.first,
+                   let cgImage = Self.cgImage(from: primaryCapture.imageData) {
+                    await NativeElementDetector.shared.detectElements(in: cgImage)
+                    if showDetectionOverlay {
+                        await updateDetectionOverlay()
+                    }
+                }
 
                 guard !Task.isCancelled else { return }
 
@@ -1147,54 +1471,39 @@ final class CompanionManager: ObservableObject {
                     return screenCaptures.first(where: { $0.isCursorScreen })
                 }()
 
-                if let pointCoordinate = parseResult.coordinate,
+                // Route through the unified ElementResolver.
+                if let rawLabel = parseResult.elementLabel,
+                   rawLabel.lowercased() != "none",
                    let targetScreenCapture {
-                    // Try OmniParser cache first (instant), then full scan, then Claude coordinates
-                    let elementLabel = parseResult.elementLabel ?? "element"
+                    let elementLabel = rawLabel
                     let targetCapture = targetScreenCapture
 
-                    // Try instant cache lookup first
-                    if let omniResult = await OmniParserClient.shared.findFromCache(query: elementLabel) {
-                        print("🎯 OmniParser CACHE hit \"\(elementLabel)\" at (\(Int(omniResult.center.x)),\(Int(omniResult.center.y))) [age: \(omniResult.cacheAgeMs)ms]")
+                    // resolve() handles the AX → YOLO → LLM cascade internally,
+                    // including running YOLO detection only if AX missed.
+                    let resolution = await ElementResolver.shared.resolve(
+                        label: elementLabel,
+                        llmHintInScreenshotPixels: parseResult.coordinate,
+                        latestCapture: targetCapture
+                    )
+
+                    if let resolution {
                         await MainActor.run {
-                            self.pointAtScreenPixel(omniResult.center, capture: targetCapture, label: elementLabel)
-                        }
-                    } else if let omniResult = await OmniParserClient.shared.findElement(query: elementLabel, imageBase64: targetCapture.imageData.base64EncodedString()), omniResult.cacheAgeMs < 5000 {
-                        // OmniParser found it — use its coordinates (more precise than Claude)
-                        print("🎯 OmniParser found \"\(elementLabel)\" at (\(Int(omniResult.center.x)),\(Int(omniResult.center.y)))")
-                        await MainActor.run {
-                            self.pointAtScreenPixel(omniResult.center, capture: targetCapture, label: elementLabel)
+                            self.pointAtResolution(resolution)
                         }
                     } else {
-                        // Fall back to Claude's coordinates
-                        let screenshotWidth = CGFloat(targetCapture.screenshotWidthInPixels)
-                        let screenshotHeight = CGFloat(targetCapture.screenshotHeightInPixels)
-                        let displayWidth = CGFloat(targetCapture.displayWidthInPoints)
-                        let displayHeight = CGFloat(targetCapture.displayHeightInPoints)
-                        let displayFrame = targetCapture.displayFrame
-
-                        let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                        let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-                        let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                        let displayLocalY = clampedY * (displayHeight / screenshotHeight)
-                        let appKitY = displayHeight - displayLocalY
-
-                        let globalLocation = CGPoint(
-                            x: displayLocalX + displayFrame.origin.x,
-                            y: appKitY + displayFrame.origin.y
-                        )
-
-                        detectedElementScreenLocation = globalLocation
-                        detectedElementDisplayFrame = displayFrame
-                        print("🎯 Claude pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(elementLabel)\"")
+                        print("🎯 could not resolve \"\(elementLabel)\"")
                     }
 
                     // Highlight the matched element in the detection overlay
                     self.highlightedElementLabel = elementLabel
                     ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
 
-                    // Queue remaining steps for multi-step navigation
-                    if !pendingStepLabels.isEmpty {
+                    // Queue remaining steps for multi-step navigation.
+                    // Only the legacy Claude pipeline uses this timed
+                    // queue — Gemini Live has its own click-driven
+                    // WorkflowRunner and the two must not both run.
+                    if !pendingStepLabels.isEmpty,
+                       self.voiceMode == .claudeAndElevenLabs {
                         self.queuePendingSteps(pendingStepLabels)
                     }
                 } else {
@@ -1279,7 +1588,7 @@ final class CompanionManager: ObservableObject {
     /// credits run out. Uses NSSpeechSynthesizer so it works even when
     /// ElevenLabs is down.
     private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+        let utterance = "I'm all out of credits. Please reach out to the developer to bring me back to life."
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
@@ -1299,47 +1608,76 @@ final class CompanionManager: ObservableObject {
         let screenNumber: Int?
     }
 
-    /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
-    /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
+    /// Parses a [POINT:...] tag from the end of the LLM's response.
+    /// Accepts three formats:
+    ///   • [POINT:label]                      — label-only (preferred)
+    ///   • [POINT:label:screenN]              — label on secondary screen
+    ///   • [POINT:x,y:label]                  — legacy pixel-coord form
+    ///   • [POINT:x,y:label:screenN]          — legacy with screen
+    ///   • [POINT:none]                       — no pointing
+    /// Returns the spoken text (tag removed) and the coordinate (if any) + label + screen.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
-        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
+        // Try the legacy x,y form first so its numeric prefix doesn't accidentally match as a label.
+        // Pattern breakdown:
+        //   \[POINT:
+        //     (?: none
+        //       | (\d+)\s*,\s*(\d+)           -> groups 1,2: x,y (legacy form)
+        //         (?::([^\]:]+?))?            -> group 3: legacy label
+        //         (?::screen(\d+))?           -> group 4: legacy screen
+        //       | ([^\]:\d][^\]:]*?)          -> group 5: label-only (must not start with digit)
+        //         (?::screen(\d+))?           -> group 6: label-only screen
+        //     )
+        //   \]\s*$
+        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:]+?))?(?::screen(\d+))?|([^\]:\d][^\]:]*?)(?::screen(\d+))?)\]\s*$"#
 
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
               let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
-            // No tag found at all
             return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
         }
 
-        // Remove the tag from the spoken text
         let tagRange = Range(match.range, in: responseText)!
         let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Check if it's [POINT:none]
-        guard match.numberOfRanges >= 3,
-              let xRange = Range(match.range(at: 1), in: responseText),
-              let yRange = Range(match.range(at: 2), in: responseText),
-              let x = Double(responseText[xRange]),
-              let y = Double(responseText[yRange]) else {
-            return PointingParseResult(spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil)
+        // Legacy x,y form: groups 1 and 2 captured.
+        if let xRange = Range(match.range(at: 1), in: responseText),
+           let yRange = Range(match.range(at: 2), in: responseText),
+           let x = Double(responseText[xRange]),
+           let y = Double(responseText[yRange]) {
+
+            var elementLabel: String? = nil
+            if let labelRange = Range(match.range(at: 3), in: responseText) {
+                elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+            }
+            var screenNumber: Int? = nil
+            if let screenRange = Range(match.range(at: 4), in: responseText) {
+                screenNumber = Int(responseText[screenRange])
+            }
+
+            return PointingParseResult(
+                spokenText: spokenText,
+                coordinate: CGPoint(x: x, y: y),
+                elementLabel: elementLabel,
+                screenNumber: screenNumber
+            )
         }
 
-        var elementLabel: String? = nil
-        if match.numberOfRanges >= 4, let labelRange = Range(match.range(at: 3), in: responseText) {
-            elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+        // Label-only form: group 5 captured.
+        if let labelRange = Range(match.range(at: 5), in: responseText) {
+            let elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
+            var screenNumber: Int? = nil
+            if let screenRange = Range(match.range(at: 6), in: responseText) {
+                screenNumber = Int(responseText[screenRange])
+            }
+            return PointingParseResult(
+                spokenText: spokenText,
+                coordinate: nil,
+                elementLabel: elementLabel,
+                screenNumber: screenNumber
+            )
         }
 
-        var screenNumber: Int? = nil
-        if match.numberOfRanges >= 5, let screenRange = Range(match.range(at: 4), in: responseText) {
-            screenNumber = Int(responseText[screenRange])
-        }
-
-        return PointingParseResult(
-            spokenText: spokenText,
-            coordinate: CGPoint(x: x, y: y),
-            elementLabel: elementLabel,
-            screenNumber: screenNumber
-        )
+        // [POINT:none] — match succeeded but no captures.
+        return PointingParseResult(spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil)
     }
 
     // MARK: - Onboarding Video
@@ -1543,4 +1881,128 @@ final class CompanionManager: ObservableObject {
             }
         }
     }
+
+    // MARK: - Image Conversion
+
+    /// Convert JPEG Data to CGImage for native element detection.
+    static func cgImage(from jpegData: Data) -> CGImage? {
+        guard let imageSource = CGImageSourceCreateWithData(jpegData as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(imageSource, 0, nil)
+    }
+
+    // MARK: - Gemini Live Mode
+
+    /// Track the last parsed transcript prefix so we only process new [POINT:] tags once.
+    private var lastGeminiTranscriptLength: Int = 0
+
+    /// Called whenever Gemini's output transcript grows — scans for [POINT:]
+    /// tags and triggers cursor pointing for each new one.
+    ///
+    /// The key correctness guarantee: we use the EXACT same frame Gemini
+    /// reasoned about (via `geminiLiveSession.latestCapture`) — not a fresh
+    /// screenshot. This matters because Gemini's coordinates are relative
+    /// to the JPEG bytes we sent it, and YOLO's cache was populated on the
+    /// same pixels. Any other screenshot would be in a slightly different
+    /// coordinate space and the cursor would land off-target.
+    private func handleGeminiTranscriptUpdate(_ fullTranscript: String) {
+        guard fullTranscript.count > lastGeminiTranscriptLength else { return }
+        let newPortion = String(fullTranscript.suffix(fullTranscript.count - lastGeminiTranscriptLength))
+        lastGeminiTranscriptLength = fullTranscript.count
+
+        // If the parallel planner already set a pointing target this
+        // turn, don't let a transcript [POINT:] tag overwrite it — the
+        // planner's plan is more reliable than speech-transcribed tags.
+        if planAppliedThisTurn { return }
+
+        let parseResult = Self.parsePointingCoordinates(from: newPortion)
+
+        guard let elementLabel = parseResult.elementLabel,
+              elementLabel.lowercased() != "none" else {
+            return
+        }
+
+        let hint = parseResult.coordinate
+        let capture = geminiLiveSession.latestCapture
+
+        Task {
+            // resolve() runs AX first, then lazily runs YOLO detection on
+            // the capture only if AX missed. Keeps work minimal during
+            // audio-sensitive sessions.
+            guard let resolution = await ElementResolver.shared.resolve(
+                label: elementLabel,
+                llmHintInScreenshotPixels: hint,
+                latestCapture: capture
+            ) else {
+                return
+            }
+            await MainActor.run {
+                self.pointAtResolution(resolution)
+            }
+        }
+    }
+
+    /// Execute a workflow plan emitted by Gemini. For now we just fly
+    /// the cursor to step 1 — Gemini speaks the rest of the flow aloud
+    /// and the user follows the menu path themselves. Clicks, state
+    /// verification, and auto-advance will come later.
+    private func startWorkflowPlan(_ plan: WorkflowPlan) {
+        print("[Workflow] received plan from LLM: \"\(plan.goal)\" (\(plan.steps.count) steps)")
+        WorkflowRunner.shared.start(
+            plan: plan,
+            pointHandler: { [weak self] resolution in
+                self?.pointAtResolution(resolution)
+            },
+            latestCapture: geminiLiveSession.latestCapture
+        )
+    }
+
+    /// Start a Gemini Live session on hotkey press (when voiceMode is .geminiLive).
+    /// We run three things in parallel from the instant the hotkey fires:
+    ///   1. WebSocket open + Gemini session setup (~300-500ms)
+    ///   2. Screenshot capture + YOLO/OCR detection on the active frame
+    ///   3. AX tree warmup on the frontmost app
+    /// By the time Gemini's first response streams back, both the YOLO
+    /// cache and the AX tree are already hot — so the very first [POINT:]
+    /// resolves as accurately as every subsequent one.
+    func startGeminiLiveSession() {
+        lastGeminiTranscriptLength = 0
+
+        // Kick off local warmup IMMEDIATELY — doesn't wait for the
+        // WebSocket. This is the most time we save.
+        Task.detached(priority: .userInitiated) {
+            await Self.warmLocalResolvers()
+        }
+
+        Task {
+            do {
+                try await geminiLiveSession.start(initialScreenshot: nil)
+            } catch {
+                print("[GeminiLive] Failed to start session: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Capture a fresh frame + run YOLO/OCR + prime the AX tree.
+    /// Safe to call from any thread — everything here is thread-safe.
+    private static func warmLocalResolvers() async {
+        // Screenshot + detection — run the CoreML pass at background
+        // priority so it can't contend with Gemini Live's audio thread
+        // once narration starts.
+        if let cgImage = try? await CompanionScreenCaptureUtility.capturePrimaryScreenAsCGImage() {
+            await Task.detached(priority: .background) {
+                await NativeElementDetector.shared.detectElements(in: cgImage)
+            }.value
+        }
+        // AX tree throwaway query — forces macOS to populate the tree
+        // for the frontmost app so the first real lookup is hot.
+        _ = await ElementResolver.shared.tryAccessibilityTree(label: "__warmup__")
+    }
+
+    /// End the Gemini Live session (on hotkey release).
+    func stopGeminiLiveSession() {
+        WorkflowRunner.shared.stop()
+        planAppliedThisTurn = false
+        geminiLiveSession.stop()
+    }
+
 }

@@ -1,0 +1,490 @@
+//
+//  GeminiLiveClient.swift
+//  leanring-buddy
+//
+//  WebSocket client for Google's Gemini Live API. Single bidirectional
+//  streaming connection that handles voice input, vision input, voice
+//  output, and text transcription in one model — plus in-stream tool
+//  calls for pointing + workflow planning.
+//
+//  Connection lifecycle:
+//  1. connect() opens the WebSocket and sends the initial config message
+//  2. Server responds with {"setupComplete": {}} — only then can we send data
+//  3. sendAudioChunk() streams PCM16 16kHz mono audio (from the mic)
+//  4. sendScreenshot() sends a JPEG frame (max 1 fps per docs)
+//  5. Server streams back audio (PCM16 24kHz), input/output transcripts,
+//     and turn lifecycle events (turnComplete, interrupted, etc.)
+//
+
+import Foundation
+
+/// Events received from the Gemini Live WebSocket.
+enum GeminiLiveEvent {
+    /// Server is ready to receive audio/image/text input
+    case setupComplete
+
+    /// A chunk of PCM16 24kHz audio from the model's voice response
+    case audioChunk(Data)
+
+    /// Partial transcript of what the user said (ASR output)
+    case inputTranscript(String)
+
+    /// Partial transcript of what the model said (for [POINT:] parsing)
+    case outputTranscript(String)
+
+    /// Model finished its turn — safe to send new user input
+    case turnComplete
+
+    /// User interrupted the model (barge-in) — discard any queued audio
+    case interrupted
+
+    /// Model called one of our registered tools. The app must invoke the
+    /// tool, then reply with `sendToolResponse(id:name:response:)` before
+    /// Gemini can continue its turn.
+    case toolCall(id: String, name: String, args: [String: Any])
+
+    /// Fatal connection error — client will disconnect
+    case error(Error)
+}
+
+/// Intentionally NOT @MainActor. `sendAudioChunk` is called from the
+/// real-time audio thread (installTap callback) and cannot afford to
+/// hop to main on every buffer — that starves Core Audio and causes
+/// Gemini's voice playback to stutter. Internal state is protected by
+/// `stateLock`. Event callbacks are dispatched to main explicitly.
+final class GeminiLiveClient: @unchecked Sendable {
+
+    // MARK: - Configuration
+
+    /// The Gemini Live model ID. Flash-live is the fastest and cheapest.
+    static let modelID = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+
+    /// Voice name — see Gemini docs for options: Puck, Charon, Kore, Fenrir, Aoede
+    static let defaultVoice = "Kore"
+
+    /// Audio input format: PCM16 16kHz mono, matches what BuddyPCM16AudioConverter produces
+    static let inputSampleRate: Double = 16_000
+
+    /// Audio output format: PCM16 24kHz mono — Gemini always returns this rate
+    static let outputSampleRate: Double = 24_000
+
+    // MARK: - State (protected by stateLock)
+
+    private let stateLock = NSLock()
+    private var webSocketTask: URLSessionWebSocketTask?
+    private var receiveLoopTask: Task<Void, Never>?
+    private var _isConnected: Bool = false
+    private var _isSetupComplete: Bool = false
+
+    var isConnected: Bool {
+        stateLock.withLock { _isConnected }
+    }
+    var isSetupComplete: Bool {
+        stateLock.withLock { _isSetupComplete }
+    }
+
+    /// Callback invoked on every event received from the server.
+    /// Dispatched to the main thread before firing so UI code can update safely.
+    var onEvent: ((GeminiLiveEvent) -> Void)?
+
+    private let urlSession: URLSession
+
+    init() {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 0  // no overall timeout — conversations can be long
+        self.urlSession = URLSession(configuration: configuration)
+    }
+
+    // MARK: - Connection Lifecycle
+
+    /// Opens the WebSocket and sends the initial session config.
+    /// Waits until the server responds with setupComplete before returning.
+    /// Throws if connection or setup fails.
+    func connect(apiKey: String, systemPrompt: String, voice: String = GeminiLiveClient.defaultVoice) async throws {
+        guard !isConnected else {
+            print("[GeminiLive] Already connected — ignoring connect()")
+            return
+        }
+
+        let urlString = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=\(apiKey)"
+        guard let url = URL(string: urlString) else {
+            throw NSError(domain: "GeminiLive", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid WebSocket URL"])
+        }
+
+        let task = urlSession.webSocketTask(with: url)
+        stateLock.withLock {
+            self.webSocketTask = task
+            self._isConnected = true
+        }
+        task.resume()
+        print("[GeminiLive] WebSocket opened")
+
+        // Start the receive loop so we can pick up the setupComplete event
+        startReceiveLoop()
+
+        // Send the setup message. This configures the session — model, voice,
+        // response modalities (audio + text transcriptions), system instruction,
+        // automatic voice activity detection, AND the tools Gemini can call.
+        //
+        // Two tools are declared:
+        //   - point_at_element(label): single-element pointing for "where's X"
+        //     type questions. Fast path — resolves locally via AX + YOLO.
+        //   - create_workflow(goal): multi-step plan generation for "how do I X"
+        //     walkthroughs. Runs the separate planner model which returns a
+        //     JSON plan the voice then narrates in sync.
+        //
+        // Gemini chooses which tool to call based on the user's request. This
+        // replaces the brittle [POINT:] tag parsing from spoken transcripts.
+        let pointAtElementTool: [String: Any] = [
+            "name": "point_at_element",
+            "description": "Fly the cursor to a single visible UI element on the user's screen. Use for simple 'where is X' / 'point at X' questions where ONE element is all that's needed and it's visible right now.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "label": [
+                        "type": "string",
+                        "description": "The literal visible text of the element — e.g. 'Save', 'File', 'Source Control'. Use the actual text on screen, not a description."
+                    ]
+                ],
+                "required": ["label"]
+            ]
+        ]
+        // submit_workflow_plan folds the old planner model into this
+        // single tool call. Gemini Live has vision + reasoning; it can
+        // produce the plan itself without a second round-trip to a
+        // separate planner API. The cursor moves the moment the tool
+        // call arrives, in perfect sync with the speech that follows.
+        let submitWorkflowPlanTool: [String: Any] = [
+            "name": "submit_workflow_plan",
+            "description": "For any multi-step walkthrough (opening a menu then picking an item, 'how do I X', 'walk me through Y', 'teach me Z'). Emit the FULL plan of steps as a structured argument. Gemini narrates each step after the tool returns, while the cursor flies through them in order.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "goal": [
+                        "type": "string",
+                        "description": "Short natural-language summary of what the user wants to accomplish."
+                    ],
+                    "app": [
+                        "type": "string",
+                        "description": "EXACT name of the foreground application visible in the screenshot — e.g. 'Blender', 'Xcode', 'GarageBand'. Used to target the right accessibility tree. Do NOT guess 'macOS' or 'unknown'."
+                    ],
+                    "steps": [
+                        "type": "array",
+                        "description": "Ordered list of steps. First step MUST be visible on the current screen; later steps describe the path to take after clicking step 1.",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "label": [
+                                    "type": "string",
+                                    "description": "Literal visible text of the element, or nearest label for an icon."
+                                ],
+                                "hint": [
+                                    "type": "string",
+                                    "description": "Short sentence describing this step — e.g. 'Open the File menu'."
+                                ],
+                                "x": [
+                                    "type": "integer",
+                                    "description": "Optional pixel x-coordinate in the screenshot's coordinate space. Only needed for step 1, and only if the app lacks accessibility support (Blender, games, canvas tools)."
+                                ],
+                                "y": [
+                                    "type": "integer",
+                                    "description": "Optional pixel y-coordinate in the screenshot's coordinate space."
+                                ]
+                            ],
+                            "required": ["label"]
+                        ]
+                    ]
+                ],
+                "required": ["goal", "app", "steps"]
+            ]
+        ]
+
+        let setupMessage: [String: Any] = [
+            "setup": [
+                "model": Self.modelID,
+                "generationConfig": [
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": [
+                        "voiceConfig": [
+                            "prebuiltVoiceConfig": [
+                                "voiceName": voice
+                            ]
+                        ]
+                    ]
+                ],
+                "systemInstruction": [
+                    "parts": [["text": systemPrompt]]
+                ],
+                // Enable server-side transcription of both sides of the conversation.
+                "inputAudioTranscription": [:],
+                "outputAudioTranscription": [:],
+                "tools": [
+                    ["functionDeclarations": [pointAtElementTool, submitWorkflowPlanTool]]
+                ]
+            ]
+        ]
+
+        try await sendJSON(setupMessage)
+
+        // Wait for setupComplete before allowing audio/image input.
+        // The receive loop will flip isSetupComplete and fire the .setupComplete event.
+        let setupDeadline = Date().addingTimeInterval(10)
+        while !isSetupComplete {
+            if Date() > setupDeadline {
+                disconnect()
+                throw NSError(domain: "GeminiLive", code: -2,
+                              userInfo: [NSLocalizedDescriptionKey: "Setup timeout — no setupComplete after 10s"])
+            }
+            try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+        }
+    }
+
+    /// Closes the WebSocket and cleans up state.
+    func disconnect() {
+        let (capturedReceiveTask, capturedWebSocketTask) = stateLock.withLock {
+            let taken = (receiveLoopTask, webSocketTask)
+            receiveLoopTask = nil
+            webSocketTask = nil
+            _isConnected = false
+            _isSetupComplete = false
+            return taken
+        }
+        capturedReceiveTask?.cancel()
+        capturedWebSocketTask?.cancel(with: .normalClosure, reason: nil)
+        print("[GeminiLive] WebSocket closed")
+    }
+
+    // MARK: - Sending Data
+
+    /// Send a chunk of PCM16 16kHz mono audio from the microphone.
+    /// Callable from any thread — the audio tap calls this on the real-time
+    /// audio thread so we must NOT hop to main. WebSocket .send() is
+    /// thread-safe under the hood.
+    func sendAudioChunk(_ pcm16Data: Data) {
+        guard isSetupComplete else { return }
+        let base64Audio = pcm16Data.base64EncodedString()
+        let message: [String: Any] = [
+            "realtimeInput": [
+                "audio": [
+                    "data": base64Audio,
+                    "mimeType": "audio/pcm;rate=16000"
+                ]
+            ]
+        ]
+        Task {
+            try? await self.sendJSON(message)
+        }
+    }
+
+    /// Send a screenshot (JPEG data) so Gemini can see the user's screen.
+    /// Per docs: max 1 frame per second, will be resized server-side.
+    func sendScreenshot(_ jpegData: Data) {
+        guard isSetupComplete else { return }
+        let base64Image = jpegData.base64EncodedString()
+        let message: [String: Any] = [
+            "realtimeInput": [
+                "video": [
+                    "data": base64Image,
+                    "mimeType": "image/jpeg"
+                ]
+            ]
+        ]
+        Task {
+            try? await self.sendJSON(message)
+        }
+    }
+
+    /// Send a text message — useful for seeding context or asking without speaking.
+    func sendText(_ text: String) {
+        guard isSetupComplete else { return }
+        let message: [String: Any] = [
+            "realtimeInput": [
+                "text": text
+            ]
+        ]
+        Task {
+            try? await self.sendJSON(message)
+        }
+    }
+
+    /// Reply to a tool call Gemini made. The model's turn is paused until
+    /// this response arrives — it uses the result to continue narrating.
+    /// The `response` dictionary is serialized as-is into the toolResponse
+    /// envelope; keep it small and JSON-serializable.
+    func sendToolResponse(id: String, name: String, response: [String: Any]) {
+        guard isSetupComplete else { return }
+        let message: [String: Any] = [
+            "toolResponse": [
+                "functionResponses": [
+                    [
+                        "id": id,
+                        "name": name,
+                        "response": response
+                    ]
+                ]
+            ]
+        ]
+        Task {
+            try? await self.sendJSON(message)
+        }
+    }
+
+    // MARK: - WebSocket I/O
+
+    private func sendJSON(_ message: [String: Any]) async throws {
+        let task = stateLock.withLock { webSocketTask }
+        guard let task else { return }
+        let data = try JSONSerialization.data(withJSONObject: message)
+        guard let jsonString = String(data: data, encoding: .utf8) else {
+            throw NSError(domain: "GeminiLive", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON as UTF-8"])
+        }
+        try await task.send(.string(jsonString))
+    }
+
+    private func startReceiveLoop() {
+        let loopTask = Task { [weak self] in
+            guard let self = self else { return }
+            while !Task.isCancelled {
+                let task = self.stateLock.withLock { self.webSocketTask }
+                guard let task else { break }
+                do {
+                    let message = try await task.receive()
+                    await self.handleIncomingMessage(message)
+                } catch {
+                    if !Task.isCancelled {
+                        print("[GeminiLive] Receive error: \(error.localizedDescription)")
+                        self.dispatchEvent(.error(error))
+                        self.disconnect()
+                    }
+                    break
+                }
+            }
+        }
+        stateLock.withLock { receiveLoopTask = loopTask }
+    }
+
+    private func dispatchEvent(_ event: GeminiLiveEvent) {
+        // Callers expect onEvent to fire on main — Gemini events often
+        // drive SwiftUI state updates (isModelSpeaking, waveform, etc.).
+        DispatchQueue.main.async { [weak self] in
+            self?.onEvent?(event)
+        }
+    }
+
+    private func handleIncomingMessage(_ message: URLSessionWebSocketTask.Message) async {
+        // Gemini sends messages either as JSON text frames OR as binary JSON data.
+        // Handle both formats.
+        let rawData: Data
+        switch message {
+        case .data(let data):
+            rawData = data
+        case .string(let text):
+            rawData = text.data(using: .utf8) ?? Data()
+        @unknown default:
+            return
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: rawData) as? [String: Any] else {
+            print("[GeminiLive] Failed to parse message as JSON")
+            return
+        }
+
+        // 1. Setup complete — we're ready to send input
+        if json["setupComplete"] != nil {
+            stateLock.withLock { _isSetupComplete = true }
+            print("[GeminiLive] Setup complete")
+            dispatchEvent(.setupComplete)
+            return
+        }
+
+        // 2. Server content — contains model turn audio, transcriptions, lifecycle flags
+        if let serverContent = json["serverContent"] as? [String: Any] {
+            handleServerContent(serverContent)
+            return
+        }
+
+        // 3. Tool call — Gemini wants us to run one of the registered tools
+        //    (point_at_element or create_workflow). Its turn is paused until
+        //    we reply via sendToolResponse.
+        if let toolCall = json["toolCall"] as? [String: Any],
+           let functionCalls = toolCall["functionCalls"] as? [[String: Any]] {
+            for call in functionCalls {
+                let id = (call["id"] as? String) ?? ""
+                let name = (call["name"] as? String) ?? ""
+                let args = (call["args"] as? [String: Any]) ?? [:]
+                print("[GeminiLive] toolCall \(name)(\(args)) id=\(id)")
+                dispatchEvent(.toolCall(id: id, name: name, args: args))
+            }
+            return
+        }
+
+        // 4. goAway — server will disconnect soon, we should reconnect proactively
+        if let goAway = json["goAway"] as? [String: Any] {
+            print("[GeminiLive] Server signaled goAway: \(goAway)")
+            return
+        }
+
+        // Unknown message shape — log and move on
+        print("[GeminiLive] Unhandled message: \(json.keys)")
+    }
+
+    private func handleServerContent(_ serverContent: [String: Any]) {
+        // Audio chunks from the model's voice response — and, occasionally,
+        // inline function calls that Gemini Live emits inside modelTurn.parts
+        // instead of as a top-level toolCall envelope.
+        if let modelTurn = serverContent["modelTurn"] as? [String: Any],
+           let parts = modelTurn["parts"] as? [[String: Any]] {
+            for part in parts {
+                if let inlineData = part["inlineData"] as? [String: Any],
+                   let mimeType = inlineData["mimeType"] as? String,
+                   mimeType.hasPrefix("audio/pcm"),
+                   let base64Audio = inlineData["data"] as? String,
+                   let audioData = Data(base64Encoded: base64Audio) {
+                    dispatchEvent(.audioChunk(audioData))
+                }
+
+                // Inline function call form — same payload as a toolCall, just
+                // embedded in the model's turn. Gemini Live's docs aren't
+                // fully consistent about which envelope it uses, so handle both.
+                if let functionCall = part["functionCall"] as? [String: Any] {
+                    let id = (functionCall["id"] as? String) ?? ""
+                    let name = (functionCall["name"] as? String) ?? ""
+                    let args = (functionCall["args"] as? [String: Any]) ?? [:]
+                    print("[GeminiLive] inline functionCall \(name)(\(args)) id=\(id)")
+                    dispatchEvent(.toolCall(id: id, name: name, args: args))
+                }
+            }
+        }
+
+        if let inputTranscription = serverContent["inputTranscription"] as? [String: Any],
+           let text = inputTranscription["text"] as? String {
+            dispatchEvent(.inputTranscript(text))
+        }
+
+        if let outputTranscription = serverContent["outputTranscription"] as? [String: Any],
+           let text = outputTranscription["text"] as? String {
+            dispatchEvent(.outputTranscript(text))
+        }
+
+        if let interrupted = serverContent["interrupted"] as? Bool, interrupted {
+            dispatchEvent(.interrupted)
+        }
+
+        if let turnComplete = serverContent["turnComplete"] as? Bool, turnComplete {
+            dispatchEvent(.turnComplete)
+        }
+    }
+}
+
+/// Minimal withLock helper — NSLocking gets this in Swift 5.9+ but we
+/// define it here explicitly so the build doesn't depend on toolchain.
+extension NSLocking {
+    func withLock<R>(_ body: () throws -> R) rethrows -> R {
+        self.lock()
+        defer { self.unlock() }
+        return try body()
+    }
+}

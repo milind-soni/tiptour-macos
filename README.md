@@ -31,10 +31,11 @@ npm install
 
 Create `worker/.dev.vars`:
 ```
-ANTHROPIC_API_KEY=your-key
-ASSEMBLYAI_API_KEY=your-key
-ELEVENLABS_API_KEY=your-key
+GEMINI_API_KEY=your-key
+ANTHROPIC_API_KEY=your-key       # optional — legacy Claude voice mode
+ELEVENLABS_API_KEY=your-key      # optional — legacy Claude voice mode
 ELEVENLABS_VOICE_ID=your-voice-id
+OPENROUTER_API_KEY=your-key      # optional — tutorial pointing fallback
 ```
 
 Run locally:
@@ -62,18 +63,22 @@ The app appears in your **menu bar** (not the dock).
 
 ## Architecture
 
-```
-User holds Control+Option
-  → AVAudioEngine captures mic
-  → PCM16 streamed via WebSocket to AssemblyAI (real-time)
-  → Live transcription on screen
+Primary mode is **Gemini Live**: one bidirectional WebSocket handles voice in, vision, voice out, and tool calling in a single model. The older Claude + ElevenLabs pipeline remains selectable for comparison.
 
-User releases
-  → Screenshot captured (ScreenCaptureKit)
-  → Transcript + screenshot → Claude (via Cloudflare Worker)
-  → Claude responds with text + [POINT:x,y:label] tags
-  → ElevenLabs speaks the response
-  → Cursor flies along bezier arc to each target element
+```
+User presses Control+Option
+  → Gemini Live WebSocket opens (voice in + vision)
+  → User speaks; Gemini hears streaming audio
+  → Gemini sees periodic screenshot frames
+  → Gemini picks one of two tools:
+      - point_at_element(label)         single-click ask
+      - submit_workflow_plan(goal,app,steps)  multi-step walkthrough
+  → ElementResolver turns labels into pixel coords via:
+      1. macOS accessibility tree (native apps — instant, pixel-perfect)
+      2. on-device YOLO + Apple Vision OCR (Blender, games, canvas)
+      3. raw LLM coordinates (last resort)
+  → Cursor flies along a bezier arc to the target
+  → Gemini narrates in sync — one model owns both speech and plan
 ```
 
 ## Video-to-Guide Pipeline
@@ -90,6 +95,6 @@ Extracts timestamped steps from video transcripts using Gemini AI. Output is a J
 ## Credits
 
 - [Clicky](https://github.com/farzaa/clicky) by Farza — the foundation
-- Claude by Anthropic — AI vision + reasoning
-- AssemblyAI — real-time speech transcription
-- ElevenLabs — text-to-speech
+- Gemini Live (Google) — realtime voice + vision + tool calling
+- Claude by Anthropic — vision + reasoning in the legacy mode
+- ElevenLabs — text-to-speech in the legacy mode

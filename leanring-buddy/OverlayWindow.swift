@@ -166,6 +166,20 @@ struct BlueCursorView: View {
     /// Only during the return flight can cursor movement cancel the animation.
     @State private var isReturningToCursor: Bool = false
 
+    /// Rolling buffer of recent buddy positions during bezier flight, used to
+    /// render the Olympic-fencing-style glowing trail behind the triangle.
+    /// Oldest point is at index 0; newest (current head) is at the last index.
+    @State private var flightTrailPoints: [CGPoint] = []
+
+    /// Maximum number of points kept in the trail buffer. At 60fps this is
+    /// roughly 0.35 seconds of history — long enough to feel like a trailing
+    /// wisp, short enough to keep the effect subtle and hug the buddy closely.
+    private let maximumFlightTrailPointCount: Int = 22
+
+    /// Opacity of the entire fencing trail overlay. Held at 1.0 during flight
+    /// and animated to 0.0 over ~0.3s after landing for a smooth dissolve.
+    @State private var flightTrailOpacity: Double = 0.0
+
     // MARK: - Onboarding Video Layout
 
     private let onboardingVideoPlayerWidth: CGFloat = 330
@@ -318,6 +332,20 @@ struct BlueCursorView: View {
                     }
             }
 
+            // Olympic-fencing-style glowing trail — rendered BEHIND the triangle
+            // so the head of the trail appears to emanate from the buddy.
+            // Two layered copies (blurred + sharp) produce a bloom/plasma look.
+            // Only ever visible during a bezier flight (forward or return).
+            ZStack {
+                FencingTrailView(trailPoints: flightTrailPoints)
+                    .blur(radius: 3)
+                    .opacity(0.35)
+                FencingTrailView(trailPoints: flightTrailPoints)
+                    .opacity(0.55)
+            }
+            .opacity(flightTrailOpacity)
+            .allowsHitTesting(false)
+
             // Blue triangle cursor — shown when idle or while TTS is playing (responding).
             // All three states (triangle, waveform, spinner) stay in the view tree
             // permanently and cross-fade via opacity so SwiftUI doesn't remove/re-insert
@@ -342,6 +370,9 @@ struct BlueCursorView: View {
                 .opacity({
                     // Arrow always visible during tutorial (keyboard shows key cap NEXT to it)
                     if !buddyIsVisibleOnThisScreen { return 0 }
+                    // In Gemini Live mode the arrow stays visible during listening/responding
+                    // — the waveform floats next to it instead of replacing it.
+                    if companionManager.voiceMode == .geminiLive { return cursorOpacity }
                     if companionManager.voiceState != .idle && companionManager.voiceState != .responding { return 0 }
                     return cursorOpacity
                 }())
@@ -360,11 +391,37 @@ struct BlueCursorView: View {
                     value: triangleRotationDegrees
                 )
 
-            // Blue waveform — replaces the triangle while listening
+            // Blue waveform. In Claude mode it replaces the triangle while listening.
+            // In Gemini Live mode it floats next to the triangle and stays visible
+            // through both listening and responding states — UNLESS a pointing
+            // label bubble is showing, in which case we hide the waveform so it
+            // doesn't overlap the label.
+            let waveformIsVisible: Bool = {
+                guard buddyIsVisibleOnThisScreen else { return false }
+                // Hide while pointing at an element — label bubble takes that space
+                if companionManager.detectedElementScreenLocation != nil {
+                    return false
+                }
+                if companionManager.voiceMode == .geminiLive {
+                    return companionManager.voiceState == .listening
+                        || companionManager.voiceState == .responding
+                }
+                return companionManager.voiceState == .listening
+            }()
+
+            let waveformPosition: CGPoint = {
+                if companionManager.voiceMode == .geminiLive {
+                    // Offset to the right and down from the arrow tip so both
+                    // elements are clearly visible at once.
+                    return CGPoint(x: cursorPosition.x + 22, y: cursorPosition.y + 16)
+                }
+                return cursorPosition
+            }()
+
             BlueCursorWaveformView(audioPowerLevel: companionManager.currentAudioPowerLevel)
-                .opacity(buddyIsVisibleOnThisScreen && companionManager.voiceState == .listening ? cursorOpacity : 0)
-                .position(cursorPosition)
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                .opacity(waveformIsVisible ? cursorOpacity : 0)
+                .position(waveformPosition)
+                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: waveformPosition)
                 .animation(.easeIn(duration: 0.15), value: companionManager.voiceState)
 
             // Blue spinner — shown while the AI is processing (transcription + Claude + waiting for TTS)
@@ -571,6 +628,12 @@ struct BlueCursorView: View {
         let arcHeight = min(distance * 0.2, 80.0)
         let controlPoint = CGPoint(x: midPoint.x, y: midPoint.y - arcHeight)
 
+        // Seed the fencing trail with the start position so the first rendered
+        // frame has at least one segment to draw, and make the trail fully
+        // opaque for the duration of this flight.
+        flightTrailPoints = [startPosition]
+        flightTrailOpacity = 1.0
+
         navigationAnimationTimer = Timer.scheduledTimer(withTimeInterval: frameInterval, repeats: true) { _ in
             currentFrame += 1
 
@@ -579,6 +642,7 @@ struct BlueCursorView: View {
                 self.navigationAnimationTimer = nil
                 self.cursorPosition = endPosition
                 self.buddyFlightScale = 1.0
+                self.fadeOutFencingTrail()
                 onComplete()
                 return
             }
@@ -614,6 +678,32 @@ struct BlueCursorView: View {
             // Buddy grows to ~1.3x at the apex, then shrinks back to 1.0x on landing.
             let scalePulse = sin(linearProgress * .pi)
             self.buddyFlightScale = 1.0 + scalePulse * 0.3
+
+            // Append the new head to the fencing trail and drop the oldest
+            // point if we're past the rolling-buffer cap. Keeping the trail
+            // short guarantees the glow stays close to the buddy and fades
+            // naturally behind it rather than persisting across the screen.
+            self.flightTrailPoints.append(CGPoint(x: bezierX, y: bezierY))
+            if self.flightTrailPoints.count > self.maximumFlightTrailPointCount {
+                self.flightTrailPoints.removeFirst(
+                    self.flightTrailPoints.count - self.maximumFlightTrailPointCount
+                )
+            }
+        }
+    }
+
+    /// Fades the fencing trail out over ~0.3s after a flight completes, then
+    /// clears the buffer so the next flight starts from a clean slate.
+    private func fadeOutFencingTrail() {
+        withAnimation(.easeOut(duration: 0.45)) {
+            flightTrailOpacity = 0.0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.47) {
+            // Only wipe the buffer if another flight hasn't already started
+            // and re-set opacity to 1.0 in the interim.
+            if self.flightTrailOpacity == 0.0 {
+                self.flightTrailPoints.removeAll()
+            }
         }
     }
 
@@ -705,6 +795,7 @@ struct BlueCursorView: View {
         navigationBubbleOpacity = 0.0
         navigationBubbleScale = 1.0
         buddyFlightScale = 1.0
+        fadeOutFencingTrail()
         finishNavigationAndResumeFollowing()
     }
 
@@ -748,6 +839,56 @@ struct BlueCursorView: View {
             let index = self.fullWelcomeMessage.index(self.fullWelcomeMessage.startIndex, offsetBy: currentIndex)
             self.welcomeText.append(self.fullWelcomeMessage[index])
             currentIndex += 1
+        }
+    }
+}
+
+// MARK: - Fencing Trail
+
+/// Olympic-fencing-broadcast-style glowing trail rendered behind the buddy
+/// triangle during a bezier flight. Each consecutive pair of points in
+/// `trailPoints` is stroked as a short line segment, with older segments
+/// thinner and more transparent than newer ones — producing a comet-tail
+/// taper that ends in a bright head right at the buddy's current position.
+///
+/// The view is backed by a SwiftUI `Canvas` so all segments are drawn in a
+/// single pass, which stays cheap even when the trail buffer is full.
+/// The caller applies a secondary blurred copy on top for the bloom/plasma
+/// glow effect; this view itself draws only crisp strokes.
+struct FencingTrailView: View {
+    let trailPoints: [CGPoint]
+
+    var body: some View {
+        Canvas { graphicsContext, canvasSize in
+            guard trailPoints.count > 1 else { return }
+
+            let totalSegmentCount = trailPoints.count - 1
+            for segmentIndex in 0..<totalSegmentCount {
+                let segmentStartPoint = trailPoints[segmentIndex]
+                let segmentEndPoint = trailPoints[segmentIndex + 1]
+
+                // ageProgress: 0.0 for the oldest segment (tail tip), 1.0 for
+                // the newest segment (right behind the buddy). Cubed so the
+                // tail fades into nothing very quickly — keeps the trail
+                // feeling like a soft wisp rather than a hard streak.
+                let ageProgress = Double(segmentIndex) / Double(max(totalSegmentCount - 1, 1))
+                let taperFactor = ageProgress * ageProgress * ageProgress
+
+                let outerGlowLineWidth = 1.2 + taperFactor * 5.0
+
+                var segmentPath = Path()
+                segmentPath.move(to: segmentStartPoint)
+                segmentPath.addLine(to: segmentEndPoint)
+
+                // Single soft blue stroke — no bright white core. The wrapping
+                // ZStack in the caller adds a gentle blurred copy underneath
+                // for subtle bloom; we keep this layer intentionally quiet.
+                graphicsContext.stroke(
+                    segmentPath,
+                    with: .color(DS.Colors.overlayCursorBlue.opacity(taperFactor * 0.28)),
+                    style: StrokeStyle(lineWidth: outerGlowLineWidth, lineCap: .round)
+                )
+            }
         }
     }
 }

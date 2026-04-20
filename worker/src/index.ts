@@ -15,7 +15,6 @@ interface Env {
   ANTHROPIC_API_KEY: string;
   ELEVENLABS_API_KEY: string;
   ELEVENLABS_VOICE_ID: string;
-  ASSEMBLYAI_API_KEY: string;
   GEMINI_API_KEY: string;
   OPENROUTER_API_KEY: string;
 }
@@ -23,6 +22,14 @@ interface Env {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // GET endpoints — currently just /gemini-live-key
+    if (request.method === "GET") {
+      if (url.pathname === "/gemini-live-key") {
+        return handleGeminiLiveKey(env);
+      }
+      return new Response("Method not allowed", { status: 405 });
+    }
 
     if (request.method !== "POST") {
       return new Response("Method not allowed", { status: 405 });
@@ -35,10 +42,6 @@ export default {
 
       if (url.pathname === "/tts") {
         return await handleTTS(request, env);
-      }
-
-      if (url.pathname === "/transcribe-token") {
-        return await handleTranscribeToken(env);
       }
 
       if (url.pathname === "/chat-fast") {
@@ -92,33 +95,6 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
       "content-type": response.headers.get("content-type") || "text/event-stream",
       "cache-control": "no-cache",
     },
-  });
-}
-
-async function handleTranscribeToken(env: Env): Promise<Response> {
-  const response = await fetch(
-    "https://streaming.assemblyai.com/v3/token?expires_in_seconds=480",
-    {
-      method: "GET",
-      headers: {
-        authorization: env.ASSEMBLYAI_API_KEY,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`[/transcribe-token] AssemblyAI token error ${response.status}: ${errorBody}`);
-    return new Response(errorBody, {
-      status: response.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  const data = await response.text();
-  return new Response(data, {
-    status: 200,
-    headers: { "content-type": "application/json" },
   });
 }
 
@@ -214,6 +190,29 @@ async function handleChatFast(request: Request, env: Env): Promise<Response> {
       "cache-control": "no-cache",
     },
   });
+}
+
+/**
+ * Returns the Gemini API key so the app can open a direct WebSocket
+ * to the Gemini Live API. Cloudflare Workers can't cleanly proxy
+ * WebSocket traffic to Google's endpoint, so the app connects directly.
+ *
+ * SECURITY NOTE: This endpoint exposes the raw API key to any client
+ * that hits it. For production, replace this with Gemini's ephemeral
+ * token API (v1alpha) once it's stable, or add a shared-secret header
+ * the app must send.
+ */
+function handleGeminiLiveKey(env: Env): Response {
+  if (!env.GEMINI_API_KEY) {
+    return new Response(
+      JSON.stringify({ error: "GEMINI_API_KEY not configured" }),
+      { status: 500, headers: { "content-type": "application/json" } }
+    );
+  }
+  return new Response(
+    JSON.stringify({ apiKey: env.GEMINI_API_KEY }),
+    { headers: { "content-type": "application/json", "cache-control": "no-cache" } }
+  );
 }
 
 async function handleTTS(request: Request, env: Env): Promise<Response> {

@@ -14,12 +14,17 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming
-- **Speech-to-Text**: AssemblyAI real-time streaming (`u3-rt-pro` model) via websocket, with OpenAI and Apple Speech as fallbacks
-- **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy
+- **Voice Mode**: User-selectable — `geminiLive` (primary, single-model realtime WebSocket with tool calls) or `claudeAndElevenLabs` (legacy 3-stage pipeline)
+- **Gemini Live mode (primary)**: Single WebSocket to `gemini-2.5-flash-native-audio-preview-12-2025` — bidirectional voice (PCM16 16kHz in, PCM16 24kHz out), vision (JPEG screenshots), text transcription, AND tool calling all in one streaming connection. Two tools exposed: `point_at_element(label)` for single-click asks, `submit_workflow_plan(goal, app, steps)` for multi-step walkthroughs. Gemini produces workflow plans itself inside its tool call — no separate planner model. API key fetched from Worker's `/gemini-live-key` endpoint.
+- **Claude mode (legacy)**: Apple Speech STT → Claude (Sonnet/Opus) via Worker `/chat` → ElevenLabs TTS via Worker `/tts`. Kept for comparison; no AssemblyAI dependency.
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
-- **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
-- **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
+- **Voice Input**: Gemini Live mode streams mic audio directly over the WebSocket. Claude mode uses Apple Speech on-device STT. Hotkey is a listen-only CGEvent tap so modifier-only shortcuts (ctrl+opt) work reliably in background.
+- **Element Pointing**: The LLM calls one of two tools. `ElementResolver` resolves the `label` argument to pixel positions via a three-tier lookup:
+    1. **macOS Accessibility tree** — pixel-perfect, ~30ms. Works on native Mac apps, most Electron apps, and anywhere a well-formed AX tree is exposed.
+    2. **YOLO + OCR visual detection** — fallback for apps without good AX support (Blender, games, some web content). Uses step 1's optional `x,y` hint as proximity anchor.
+    3. **Raw LLM coordinates** — absolute last resort.
+- **Element Detection**: On-device via `NativeElementDetector.swift` — CoreML YOLO model (`UIElementDetector.mlpackage`) for UI element bounding boxes + Apple Vision framework (`VNRecognizeTextRequest`, accurate mode) for OCR text detection. No external server, no Python, no OmniParser dependency.
+- **Accessibility Tree**: `AccessibilityTreeResolver.swift` walks the user's target app's AX tree via `ApplicationServices`, matches elements by title/description/value, returns exact pixel frames in global AppKit coordinates. Uses a snapshot of `NSWorkspace.frontmostApplication` taken at hotkey press time so the query targets the app the user was actually looking at, not Clicky's own menu bar.
 - **Concurrency**: `@MainActor` isolation, async/await throughout
 - **Analytics**: PostHog via `ClickyAnalytics.swift`
 
@@ -29,12 +34,17 @@ The app never calls external APIs directly. All requests go through a Cloudflare
 
 | Route | Upstream | Purpose |
 |-------|----------|---------|
-| `POST /chat` | `api.anthropic.com/v1/messages` | Claude vision + streaming chat |
-| `POST /tts` | `api.elevenlabs.io/v1/text-to-speech/{voiceId}` | ElevenLabs TTS audio |
-| `POST /transcribe-token` | `streaming.assemblyai.com/v3/token` | Fetches a short-lived (480s) AssemblyAI websocket token |
+| `GET /gemini-live-key` | — (returns secret) | Returns the Gemini API key so the app can open a direct WebSocket to Gemini Live. Cloudflare Workers can't proxy Gemini's WebSocket so we expose the key to trusted clients. |
+| `POST /chat` | `api.anthropic.com/v1/messages` | Claude vision + streaming chat (legacy voice mode only) |
+| `POST /tts` | `api.elevenlabs.io/v1/text-to-speech/{voiceId}` | ElevenLabs TTS (legacy voice mode only) |
+| `POST /chat-fast` | `openrouter.ai/api/v1/chat/completions` | Fast vision model for tutorial-step fallback pointing |
+| `POST /generate-guide` | `generativelanguage.googleapis.com/.../gemini-2.5-flash` | Gemini guide generation from YouTube transcripts |
+| `POST /transcript` | `youtube-transcript` (npm package) | Fetches YouTube video transcripts |
 
-Worker secrets: `ANTHROPIC_API_KEY`, `ASSEMBLYAI_API_KEY`, `ELEVENLABS_API_KEY`
+Worker secrets: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` (legacy), `ELEVENLABS_API_KEY` (legacy), `OPENROUTER_API_KEY`
 Worker vars: `ELEVENLABS_VOICE_ID`
+
+Removed previously: `/plan` (Gemini now plans inside its own tool call via Gemini Live — no separate planner round-trip), `/transcribe-token` + `ASSEMBLYAI_API_KEY` (Gemini Live does STT in-stream; Claude mode now uses on-device Apple Speech).
 
 ### Key Architecture Decisions
 
@@ -43,8 +53,6 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 **Cursor Overlay**: A full-screen transparent `NSPanel` hosts the blue cursor companion. It's non-activating, joins all Spaces, and never steals focus. The cursor position, response text, waveform, and pointing animations all render in this overlay via SwiftUI through `NSHostingView`.
 
 **Global Push-To-Talk Shortcut**: Background push-to-talk uses a listen-only `CGEvent` tap instead of an AppKit global monitor so modifier-based shortcuts like `ctrl + option` are detected more reliably while the app is running in the background.
-
-**Shared URLSession for AssemblyAI**: A single long-lived `URLSession` is shared across all AssemblyAI streaming sessions (owned by the provider, not the session). Creating and invalidating a URLSession per session corrupts the OS connection pool and causes "Socket is not connected" errors after a few rapid reconnections.
 
 **Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
@@ -60,16 +68,21 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
 | `BuddyDictationManager.swift` | ~866 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
-| `BuddyTranscriptionProvider.swift` | ~100 | Protocol surface and provider factory for voice transcription backends. Resolves provider based on `VoiceTranscriptionProvider` in Info.plist — AssemblyAI, OpenAI, or Apple Speech. |
-| `AssemblyAIStreamingTranscriptionProvider.swift` | ~478 | Streaming transcription provider. Fetches temp tokens from the Cloudflare Worker, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
-| `OpenAIAudioTranscriptionProvider.swift` | ~317 | Upload-based transcription provider. Buffers push-to-talk audio locally, uploads as WAV on release, returns finalized transcript. |
-| `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
+| `BuddyTranscriptionProvider.swift` | ~40 | Protocol surface. Always returns `AppleSpeechTranscriptionProvider` (only used by the legacy Claude voice mode; Gemini Live handles STT in-stream). |
+| `AppleSpeechTranscriptionProvider.swift` | ~147 | On-device transcription backed by Apple's Speech framework. Free, offline, no network key required. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
 | `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
+| `NativeElementDetector.swift` | ~270 | On-device element detection using CoreML YOLO + Apple Vision OCR. Maintains a live-fed cache for instant element lookups. Used as fallback when AX tree is unavailable. |
+| `AccessibilityTreeResolver.swift` | ~250 | Walks the frontmost app's macOS Accessibility tree, looks up elements by title/description/value, returns pixel-perfect frames. Primary element-lookup path — covers native Mac apps, SwiftUI, AppKit, most Electron. |
+| `ElementResolver.swift` | ~140 | Unified single-entry resolver. Given a label (and optional LLM coord hint), tries AX tree → YOLO+OCR → raw LLM coords in order. Always produces a global AppKit point so the overlay can fly the cursor directly. |
+| `GeminiLiveClient.swift` | ~280 | WebSocket client for Google's Gemini Live API. Sends PCM16 audio, JPEG screenshots, and text; receives PCM16 audio chunks and transcripts. All messages are JSON over a single wss:// connection. |
+| `GeminiLiveAudioPlayer.swift` | ~120 | Streaming PCM16 24kHz audio playback via AVAudioEngine + AVAudioPlayerNode. Queues incoming audio chunks from the WebSocket for gapless playback. |
+| `GeminiLiveSession.swift` | ~200 | Orchestrator that ties the WebSocket client + audio player + mic capture together. Owns the Gemini Live conversation lifecycle and exposes published state (input/output transcripts, isModelSpeaking) for the UI. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
+| `ClickDetector.swift` | ~150 | Global listen-only CGEventTap that fires a callback when a left-mouse-down lands within a tolerance radius of an armed target. WorkflowRunner uses it to auto-advance the tutorial checklist when the user clicks the element the cursor is pointing at. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
