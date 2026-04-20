@@ -600,6 +600,13 @@ final class CompanionManager: ObservableObject {
     /// confidence (e.g. "there it is on the top-right").
     @MainActor
     private func handleToolPointAtElement(label: String, screenshotJPEG: Data?) async -> [String: Any] {
+        // Same duplicate-tool-call protection as submit_workflow_plan —
+        // Gemini Live occasionally emits the inline + envelope form of
+        // the same call, and we don't want to fly the cursor twice.
+        if planAppliedThisTurn {
+            print("[Tool] ⏭️  ignoring duplicate point_at_element (already applied this turn)")
+            return ["ok": true, "duplicate": true]
+        }
         print("[Tool] 🔧 point_at_element(label=\"\(label)\")")
         let startedAt = Date()
         planAppliedThisTurn = true
@@ -630,6 +637,19 @@ final class CompanionManager: ObservableObject {
     /// no /plan endpoint, no 3-6s wait.
     @MainActor
     private func handleToolSubmitWorkflowPlan(goal: String, app: String, steps: [[String: Any]]) async -> [String: Any] {
+        // Gemini Live sometimes emits the SAME function call twice in one
+        // turn — once inline inside modelTurn.parts and once as a
+        // top-level toolCall envelope. If we start the workflow and
+        // send a toolResponse twice for the same id, Gemini's server
+        // treats the second response as a new turn trigger, interrupts
+        // its own narration mid-sentence and re-narrates from the top.
+        // Gate on `planAppliedThisTurn` so the duplicate is a cheap no-op.
+        // The flag resets on turnComplete so the next real question
+        // goes through normally.
+        if planAppliedThisTurn {
+            print("[Tool] ⏭️  ignoring duplicate submit_workflow_plan (already applied this turn)")
+            return ["ok": true, "duplicate": true]
+        }
         print("[Tool] 🔧 submit_workflow_plan(goal=\"\(goal)\", app=\"\(app)\", \(steps.count) steps)")
         planAppliedThisTurn = true
 
