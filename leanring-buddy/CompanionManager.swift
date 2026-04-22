@@ -827,6 +827,20 @@ final class CompanionManager: ObservableObject {
         NotificationCenter.default.post(name: .clickyPanelPinStateChanged, object: nil)
     }
 
+    /// Neko mode: replace the blue triangle cursor with a pixel-art
+    /// cat (classic oneko sprites) that runs toward whatever the
+    /// cursor is pointing at, picking one of 8 directional sprite
+    /// pairs based on its velocity and alternating animation frames.
+    /// Falls asleep after a few seconds of stillness. Purely a
+    /// visual personality toggle — doesn't change any behavior.
+    /// Persisted so the user's choice survives app restarts.
+    @Published var isNekoModeEnabled: Bool = UserDefaults.standard.bool(forKey: "isNekoModeEnabled")
+
+    func setNekoModeEnabled(_ enabled: Bool) {
+        isNekoModeEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isNekoModeEnabled")
+    }
+
     func setClickyCursorEnabled(_ enabled: Bool) {
         isClickyCursorEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isClickyCursorEnabled")

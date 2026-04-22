@@ -110,6 +110,21 @@ struct BlueCursorView: View {
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
 
+    /// Horizontal offset from `cursorPosition` to the LEFT edge of
+    /// bubbles / labels that sit next to the cursor. Needs to clear
+    /// the visible cursor glyph so the bubble doesn't get overdrawn.
+    /// Triangle is 16pt wide (±8), cat is 32pt (±16) — so we push
+    /// the bubble further right in Neko mode.
+    private var bubbleLeftOffsetFromCursor: CGFloat {
+        companionManager.isNekoModeEnabled ? 22 : 10
+    }
+
+    /// Vertical offset from `cursorPosition` to the TOP edge of
+    /// bubbles. Same sizing logic as the horizontal offset.
+    private var bubbleTopOffsetFromCursor: CGFloat {
+        companionManager.isNekoModeEnabled ? 24 : 18
+    }
+
     init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
         self.screenFrame = screenFrame
         self.isFirstAppearance = isFirstAppearance
@@ -221,7 +236,10 @@ struct BlueCursorView: View {
                         }
                     )
                     .opacity(bubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (bubbleSize.width / 2), y: cursorPosition.y + 18)
+                    .position(
+                        x: cursorPosition.x + bubbleLeftOffsetFromCursor + (bubbleSize.width / 2),
+                        y: cursorPosition.y + bubbleTopOffsetFromCursor
+                    )
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.easeOut(duration: 0.5), value: bubbleOpacity)
                     .onPreferenceChange(SizePreferenceKey.self) { newSize in
@@ -238,8 +256,8 @@ struct BlueCursorView: View {
                 .shadow(color: Color.black.opacity(0.4 * companionManager.onboardingVideoOpacity), radius: 12, x: 0, y: 6)
                 .opacity(isCursorOnThisScreen ? companionManager.onboardingVideoOpacity : 0)
                 .position(
-                    x: cursorPosition.x + 10 + (onboardingVideoPlayerWidth / 2),
-                    y: cursorPosition.y + 18 + (onboardingVideoPlayerHeight / 2)
+                    x: cursorPosition.x + bubbleLeftOffsetFromCursor + (onboardingVideoPlayerWidth / 2),
+                    y: cursorPosition.y + bubbleTopOffsetFromCursor + (onboardingVideoPlayerHeight / 2)
                 )
                 .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                 .animation(.easeInOut(duration: 2.0), value: companionManager.onboardingVideoOpacity)
@@ -265,7 +283,10 @@ struct BlueCursorView: View {
                         }
                     )
                     .opacity(companionManager.onboardingPromptOpacity)
-                    .position(x: cursorPosition.x + 10 + (bubbleSize.width / 2), y: cursorPosition.y + 18)
+                    .position(
+                        x: cursorPosition.x + bubbleLeftOffsetFromCursor + (bubbleSize.width / 2),
+                        y: cursorPosition.y + bubbleTopOffsetFromCursor
+                    )
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.easeOut(duration: 0.4), value: companionManager.onboardingPromptOpacity)
                     .onPreferenceChange(SizePreferenceKey.self) { newSize in
@@ -323,7 +344,10 @@ struct BlueCursorView: View {
                     )
                     .scaleEffect(navigationBubbleScale)
                     .opacity(navigationBubbleOpacity)
-                    .position(x: cursorPosition.x + 10 + (navigationBubbleSize.width / 2), y: cursorPosition.y + 18)
+                    .position(
+                        x: cursorPosition.x + bubbleLeftOffsetFromCursor + (navigationBubbleSize.width / 2),
+                        y: cursorPosition.y + bubbleTopOffsetFromCursor
+                    )
                     .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
                     .animation(.spring(response: 0.4, dampingFraction: 0.6), value: navigationBubbleScale)
                     .animation(.easeOut(duration: 0.5), value: navigationBubbleOpacity)
@@ -332,16 +356,21 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Olympic-fencing-style glowing trail — rendered BEHIND the triangle
-            // so the head of the trail appears to emanate from the buddy.
-            // Two layered copies (blurred + sharp) produce a bloom/plasma look.
-            // Only ever visible during a bezier flight (forward or return).
-            ZStack {
-                FencingTrailView(trailPoints: flightTrailPoints)
-                    .blur(radius: 3)
-                    .opacity(0.35)
-                FencingTrailView(trailPoints: flightTrailPoints)
-                    .opacity(0.55)
+            // Trail rendered BEHIND the cursor during a bezier flight.
+            // In Neko mode we leave paw-print footprints behind the
+            // running cat; default mode uses the olympic-fencing glow.
+            Group {
+                if companionManager.isNekoModeEnabled {
+                    PawPrintTrailView(trailPoints: flightTrailPoints)
+                } else {
+                    ZStack {
+                        FencingTrailView(trailPoints: flightTrailPoints)
+                            .blur(radius: 3)
+                            .opacity(0.35)
+                        FencingTrailView(trailPoints: flightTrailPoints)
+                            .opacity(0.55)
+                    }
+                }
             }
             .opacity(flightTrailOpacity)
             .allowsHitTesting(false)
@@ -352,44 +381,64 @@ struct BlueCursorView: View {
             // them (which caused a visible cursor "pop").
             //
             // During cursor following: fast spring animation for snappy tracking.
-            // During navigation: NO implicit animation — the frame-by-frame bezier
-            // timer controls position directly at 60fps for a smooth arc flight.
-            Triangle()
-                .fill(DS.Colors.overlayCursorBlue)
-                .frame(width: companionManager.tutorialActionType == "scroll" ? 12 : 16,
-                       height: companionManager.tutorialActionType == "scroll" ? 12 : 16)
-                .rotationEffect(.degrees(
-                    companionManager.isTutorialActive && companionManager.tutorialActionType == "scroll"
-                    ? 180.0  // Point down for scroll
-                    : triangleRotationDegrees
-                ))
-                .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
-                .scaleEffect(buddyFlightScale)
-                .offset(y: companionManager.isTutorialActive && companionManager.tutorialActionType == "scroll"
-                    ? scrollBounceOffset : 0)
-                .opacity({
-                    // Arrow always visible during tutorial (keyboard shows key cap NEXT to it)
-                    if !buddyIsVisibleOnThisScreen { return 0 }
-                    // In Gemini Live mode the arrow stays visible during listening/responding
-                    // — the waveform floats next to it instead of replacing it.
-                    if companionManager.voiceMode == .geminiLive { return cursorOpacity }
-                    if companionManager.voiceState != .idle && companionManager.voiceState != .responding { return 0 }
-                    return cursorOpacity
-                }())
-                .scaleEffect(buddyFlightScale)
-                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: companionManager.tutorialActionType)
-                .position(cursorPosition)
+            // Neko mode swaps the blue triangle for a pixel-art cat
+            // that picks its own directional sprite from the cursor's
+            // velocity and animates a 2-frame run cycle. Behavior is
+            // unchanged — purely a visual personality toggle.
+            if companionManager.isNekoModeEnabled {
+                NekoCursorView(
+                    position: cursorPosition,
+                    opacity: {
+                        if !buddyIsVisibleOnThisScreen { return 0 }
+                        if companionManager.voiceMode == .geminiLive { return cursorOpacity }
+                        if companionManager.voiceState != .idle && companionManager.voiceState != .responding { return 0 }
+                        return cursorOpacity
+                    }(),
+                    flightScale: buddyFlightScale
+                )
                 .animation(
                     buddyNavigationMode == .followingCursor
                         ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
                         : nil,
                     value: cursorPosition
                 )
-                .animation(.easeIn(duration: 0.25), value: companionManager.voiceState)
-                .animation(
-                    buddyNavigationMode == .navigatingToTarget ? nil : .easeInOut(duration: 0.3),
-                    value: triangleRotationDegrees
-                )
+            } else {
+                // During navigation: NO implicit animation — the frame-by-frame bezier
+                // timer controls position directly at 60fps for a smooth arc flight.
+                Triangle()
+                    .fill(DS.Colors.overlayCursorBlue)
+                    .frame(width: companionManager.tutorialActionType == "scroll" ? 12 : 16,
+                           height: companionManager.tutorialActionType == "scroll" ? 12 : 16)
+                    .rotationEffect(.degrees(
+                        companionManager.isTutorialActive && companionManager.tutorialActionType == "scroll"
+                        ? 180.0  // Point down for scroll
+                        : triangleRotationDegrees
+                    ))
+                    .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
+                    .scaleEffect(buddyFlightScale)
+                    .offset(y: companionManager.isTutorialActive && companionManager.tutorialActionType == "scroll"
+                        ? scrollBounceOffset : 0)
+                    .opacity({
+                        if !buddyIsVisibleOnThisScreen { return 0 }
+                        if companionManager.voiceMode == .geminiLive { return cursorOpacity }
+                        if companionManager.voiceState != .idle && companionManager.voiceState != .responding { return 0 }
+                        return cursorOpacity
+                    }())
+                    .scaleEffect(buddyFlightScale)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: companionManager.tutorialActionType)
+                    .position(cursorPosition)
+                    .animation(
+                        buddyNavigationMode == .followingCursor
+                            ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
+                            : nil,
+                        value: cursorPosition
+                    )
+                    .animation(.easeIn(duration: 0.25), value: companionManager.voiceState)
+                    .animation(
+                        buddyNavigationMode == .navigatingToTarget ? nil : .easeInOut(duration: 0.3),
+                        value: triangleRotationDegrees
+                    )
+            }
 
             // Blue waveform. In Claude mode it replaces the triangle while listening.
             // In Gemini Live mode it floats next to the triangle and stays visible
@@ -613,8 +662,16 @@ struct BlueCursorView: View {
         let distance = hypot(deltaX, deltaY)
 
         // Flight duration scales with distance: short hops are quick, long
-        // flights are more dramatic. Clamped to 0.6s–1.4s.
-        let flightDurationSeconds = min(max(distance / 800.0, 0.6), 1.4)
+        // flights are more dramatic. Clamped to 0.6s–1.4s for the triangle.
+        // Neko mode runs longer — the cat sprite reads as "running" so a
+        // leisurely pace feels more natural than an arrow's fast arc.
+        let isNekoMode = companionManager.isNekoModeEnabled
+        let flightDurationSeconds: Double = {
+            if isNekoMode {
+                return min(max(distance / 500.0, 1.2), 2.4)
+            }
+            return min(max(distance / 800.0, 0.6), 1.4)
+        }()
         let frameInterval: Double = 1.0 / 60.0
         let totalFrames = Int(flightDurationSeconds / frameInterval)
         var currentFrame = 0

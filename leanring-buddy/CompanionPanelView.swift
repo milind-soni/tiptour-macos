@@ -70,6 +70,12 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 12)
 
+                nekoModeToggleRow
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 12)
+
                 Divider()
                     .background(DS.Colors.borderSubtle)
                     .padding(.horizontal, 16)
@@ -594,6 +600,47 @@ struct CompanionPanelView: View {
     }
 
 
+
+    // MARK: - Neko Mode Toggle
+
+    /// Whimsical toggle that swaps the blue triangle cursor for a
+    /// pixel-art cat (classic oneko sprites). Purely visual — behavior
+    /// is unchanged. Persisted via UserDefaults in CompanionManager.
+    private var nekoModeToggleRow: some View {
+        HStack {
+            HStack(spacing: 8) {
+                Image(systemName: "cat.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(
+                        companionManager.isNekoModeEnabled
+                            ? DS.Colors.accent
+                            : DS.Colors.textTertiary
+                    )
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Neko mode")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Text("replace cursor with a pixel cat")
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { companionManager.isNekoModeEnabled },
+                set: { companionManager.setNekoModeEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .tint(DS.Colors.accent)
+            .scaleEffect(0.8)
+        }
+        .padding(.vertical, 4)
+    }
 
     // MARK: - Show TipTour Cursor Toggle
 
