@@ -693,6 +693,7 @@ final class CompanionManager: ObservableObject {
         print("[Workflow] entering Gemini narration mode — mic/screenshots paused, socket kept alive for narration")
         geminiLiveSession.enterNarrationMode()
         scheduleExitNarrationModeAfterSpeechEnds()
+        
 
         return [
             "ok": true,
@@ -809,6 +810,21 @@ final class CompanionManager: ObservableObject {
     func setAdvanceOnAnyClickEnabled(_ enabled: Bool) {
         advanceOnAnyClickEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "advanceOnAnyClickEnabled")
+    }
+
+    /// User preference for whether the menu bar panel stays visible when
+    /// the user clicks outside of it (like Raycast / a pinned popover).
+    /// When false (default), the panel auto-dismisses on outside click
+    /// — standard macOS menu bar behavior. When true, only the × close
+    /// button or clicking the menu bar icon dismisses it. Persisted.
+    @Published var isPanelPinned: Bool = UserDefaults.standard.bool(forKey: "isPanelPinned")
+
+    func setPanelPinned(_ pinned: Bool) {
+        isPanelPinned = pinned
+        UserDefaults.standard.set(pinned, forKey: "isPanelPinned")
+        // Let the panel manager react — install or remove the
+        // click-outside monitor as needed without hiding the panel.
+        NotificationCenter.default.post(name: .clickyPanelPinStateChanged, object: nil)
     }
 
     func setClickyCursorEnabled(_ enabled: Bool) {
@@ -1365,10 +1381,14 @@ final class CompanionManager: ObservableObject {
 
     ABSOLUTE RULES:
     - exactly ONE tool call per turn. never both tools, never the same tool twice.
-    - NO narration before the tool. call silently, get the response, THEN speak.
     - single visible element → point_at_element.
     - anything needing a sequence → submit_workflow_plan.
     - no UI involvement (pure knowledge or chit-chat) → no tool, just speak.
+
+    PRE-TOOL-CALL SILENCE:
+    if your next action is a tool call, stay completely silent — no filler, no "sure", no "hmm". call the tool, wait for toolResponse, THEN speak. if you speak before the tool call, the user hears a half-word that cuts off when the tool fires.
+
+    this rule ONLY applies when a tool call is coming. for pure knowledge / chit-chat with no tool, speak normally.
 
     after submit_workflow_plan returns, narrate the full plan out loud in ONE natural-sounding turn. one to two short sentences total. describe the sequence the user will follow. do NOT pause between steps, do NOT wait for anything — speak the whole thing uninterrupted and then stop. the cursor and checklist handle per-step timing independently; your job is the voice-over, not the sync.
       example: "click File, then New, then File..."

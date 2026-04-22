@@ -118,6 +118,8 @@ struct CompanionPanelView: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textTertiary)
 
+            pinToggleButton
+
             Button(action: {
                 NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
             }) {
@@ -135,6 +137,39 @@ struct CompanionPanelView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
+    }
+
+    /// Pushpin toggle. When on, the panel stays visible regardless of
+    /// outside clicks — useful for using TipTour as a workspace tool
+    /// while referring to another app. When off (default), the panel
+    /// behaves like a standard menu bar popover.
+    private var pinToggleButton: some View {
+        Button(action: {
+            companionManager.setPanelPinned(!companionManager.isPanelPinned)
+        }) {
+            Image(systemName: companionManager.isPanelPinned ? "pin.fill" : "pin")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(
+                    companionManager.isPanelPinned
+                        ? DS.Colors.accent
+                        : DS.Colors.textTertiary
+                )
+                .rotationEffect(.degrees(companionManager.isPanelPinned ? 0 : 45))
+                .frame(width: 20, height: 20)
+                .background(
+                    Circle()
+                        .fill(
+                            companionManager.isPanelPinned
+                                ? DS.Colors.accent.opacity(0.15)
+                                : Color.white.opacity(0.08)
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .help(companionManager.isPanelPinned
+            ? "Unpin: panel will close when you click outside"
+            : "Pin: panel will stay open when you click outside")
     }
 
     // MARK: - Permissions Copy

@@ -57,9 +57,16 @@ final class GeminiLiveClient: @unchecked Sendable {
     // MARK: - Configuration
 
     /// The Gemini Live model ID. Flash-live is the fastest and cheapest.
-    static let modelID = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+    /// 3.1 Flash Live is the newer production-leaning model — faster
+    /// TTFT (~300-500ms), more stable, fewer of the prompt-adherence
+    /// quirks the 2.5 native-audio preview had (double-speak, function-
+    /// call hallucination). See AI Studio reference quickstart.
+    static let modelID = "models/gemini-3.1-flash-live-preview"
 
-    /// Voice name — see Gemini docs for options: Puck, Charon, Kore, Fenrir, Aoede
+    /// Voice name. `gemini-3.1-flash-live-preview` has a different voice
+    /// inventory from 2.5 native-audio — `"Zephyr"` is silently rejected
+    /// by 3.1 (server closes socket before setupComplete). `"Kore"` is
+    /// confirmed working on 3.1 per Google's capability docs.
     static let defaultVoice = "Kore"
 
     /// Audio input format: PCM16 16kHz mono, matches what BuddyPCM16AudioConverter produces
@@ -206,6 +213,12 @@ final class GeminiLiveClient: @unchecked Sendable {
                 "model": Self.modelID,
                 "generationConfig": [
                     "responseModalities": ["AUDIO"],
+                    // Server-side image-processing resolution for
+                    // screenshots we stream in. MEDIUM matches the AI
+                    // Studio reference. On 3.1 Flash Live this field
+                    // lives INSIDE generationConfig (putting it at the
+                    // setup top level is rejected by the newer schema).
+                    "mediaResolution": "MEDIA_RESOLUTION_MEDIUM",
                     "speechConfig": [
                         "voiceConfig": [
                             "prebuiltVoiceConfig": [
@@ -220,6 +233,19 @@ final class GeminiLiveClient: @unchecked Sendable {
                 // Enable server-side transcription of both sides of the conversation.
                 "inputAudioTranscription": [:],
                 "outputAudioTranscription": [:],
+                // Context-window compression — once accumulated tokens
+                // pass `triggerTokens`, Gemini silently summarizes the
+                // oldest turns down to `targetTokens` and keeps the
+                // session alive. Without this, long sessions with many
+                // screenshots (we send one every ~1.5s) hit the context
+                // limit and the server starts dropping responses. Values
+                // match the AI Studio quickstart reference.
+                "contextWindowCompression": [
+                    "triggerTokens": 104857,
+                    "slidingWindow": [
+                        "targetTokens": 52428
+                    ]
+                ],
                 "tools": [
                     ["functionDeclarations": [pointAtElementTool, submitWorkflowPlanTool]]
                 ]
@@ -309,21 +335,48 @@ final class GeminiLiveClient: @unchecked Sendable {
         }
     }
 
+    /// How the model should handle the tool response relative to any
+    /// audio it's currently speaking. Used only when the tool is
+    /// declared `NON_BLOCKING`; sequential tools ignore it.
+    enum ToolResponseScheduling: String {
+        /// Cut current audio and speak the result immediately. Right for
+        /// tools whose result the user is actively waiting on.
+        case interrupt = "INTERRUPT"
+        /// Wait for current audio (the conversational filler) to finish,
+        /// then speak the result. Right for acknowledgment-style UX
+        /// where you want the filler to land cleanly.
+        case whenIdle = "WHEN_IDLE"
+        /// Accept the result silently into context — don't speak. Right
+        /// for background updates the model just needs to "know".
+        case silent = "SILENT"
+    }
+
     /// Reply to a tool call Gemini made. The model's turn is paused until
     /// this response arrives — it uses the result to continue narrating.
     /// The `response` dictionary is serialized as-is into the toolResponse
     /// envelope; keep it small and JSON-serializable.
-    func sendToolResponse(id: String, name: String, response: [String: Any]) {
+    ///
+    /// Pass a `scheduling` value for NON_BLOCKING tools so the post-tool
+    /// narration queues correctly relative to any filler audio the model
+    /// is currently speaking. Omit it for sequential tools.
+    func sendToolResponse(
+        id: String,
+        name: String,
+        response: [String: Any],
+        scheduling: ToolResponseScheduling? = nil
+    ) {
         guard isSetupComplete else { return }
+        var functionResponse: [String: Any] = [
+            "id": id,
+            "name": name,
+            "response": response
+        ]
+        if let scheduling {
+            functionResponse["scheduling"] = scheduling.rawValue
+        }
         let message: [String: Any] = [
             "toolResponse": [
-                "functionResponses": [
-                    [
-                        "id": id,
-                        "name": name,
-                        "response": response
-                    ]
-                ]
+                "functionResponses": [functionResponse]
             ]
         ]
         Task {

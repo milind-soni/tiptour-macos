@@ -16,6 +16,11 @@ import SwiftUI
 
 extension Notification.Name {
     static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
+    /// Posted by CompanionManager.setPanelPinned when the user toggles
+    /// the pushpin. MenuBarPanelManager reinstalls or removes the
+    /// click-outside monitor based on the new pinned state, without
+    /// hiding the panel.
+    static let clickyPanelPinStateChanged = Notification.Name("clickyPanelPinStateChanged")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -30,6 +35,7 @@ final class MenuBarPanelManager: NSObject {
     private var panel: NSPanel?
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
+    private var pinStateChangedObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
@@ -47,6 +53,22 @@ final class MenuBarPanelManager: NSObject {
         ) { [weak self] _ in
             self?.hidePanel()
         }
+
+        // When the user toggles the pushpin, reinstall or remove the
+        // outside-click monitor live — no need to close and reopen the
+        // panel for the change to take effect.
+        pinStateChangedObserver = NotificationCenter.default.addObserver(
+            forName: .clickyPanelPinStateChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, let panel = self.panel, panel.isVisible else { return }
+            if self.companionManager.isPanelPinned {
+                self.removeClickOutsideMonitor()
+            } else {
+                self.installClickOutsideMonitor()
+            }
+        }
     }
 
     deinit {
@@ -54,6 +76,9 @@ final class MenuBarPanelManager: NSObject {
             NSEvent.removeMonitor(monitor)
         }
         if let observer = dismissPanelObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = pinStateChangedObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -205,6 +230,13 @@ final class MenuBarPanelManager: NSObject {
     /// buttons in the panel) don't immediately dismiss the panel when they appear.
     private func installClickOutsideMonitor() {
         removeClickOutsideMonitor()
+
+        // Respect the user's pin preference — when pinned, the panel
+        // should behave like a regular workspace window and ignore
+        // outside clicks entirely.
+        if companionManager.isPanelPinned {
+            return
+        }
 
         clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]

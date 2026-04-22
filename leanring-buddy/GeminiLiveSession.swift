@@ -250,6 +250,38 @@ final class GeminiLiveSession: ObservableObject {
         geminiClient.sendText(text)
     }
 
+    // MARK: - Push-To-Talk Mic Gating
+    //
+    // With classic push-to-talk semantics the user HOLDS the hotkey
+    // while speaking and RELEASES to commit. On press we resume mic
+    // streaming; on release we stop streaming audio to Gemini but
+    // keep the WebSocket + audio player alive so Gemini's response
+    // plays back cleanly. This eliminates ambient-noise contamination
+    // and gives Gemini an immediate end-of-speech signal (no waiting
+    // for VAD to guess), cutting perceived response latency.
+
+    /// Stop streaming mic audio to Gemini. The audio engine is torn
+    /// down so no buffers are even captured — zero ambient noise
+    /// leaks, zero CPU cost. Safe no-op when already paused.
+    func pauseMicCaptureForPushToTalk() {
+        guard isActive else { return }
+        stopMicCapture()
+        print("[GeminiLiveSession] 🎤 Mic paused (push-to-talk released)")
+    }
+
+    /// Restart mic streaming when the user holds the hotkey for a
+    /// new utterance. Rebuilds the audio engine from scratch because
+    /// the input device/sample-rate may have changed since last use.
+    func resumeMicCaptureForPushToTalk() {
+        guard isActive else { return }
+        do {
+            try startMicCapture()
+            print("[GeminiLiveSession] 🎤 Mic resumed (push-to-talk pressed)")
+        } catch {
+            print("[GeminiLiveSession] ✗ Failed to resume mic for push-to-talk: \(error)")
+        }
+    }
+
     // MARK: - Periodic Screenshot Updates
 
     /// Start sending fresh screenshots every 1.5s so Gemini sees window
