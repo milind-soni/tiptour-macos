@@ -130,6 +130,28 @@ final class GeminiLiveSession: ObservableObject {
     /// be off by the drift between "what Gemini saw" and "current screen".
     @Published private(set) var latestCapture: CompanionScreenCapture?
 
+    /// Last perceptual hash sent to Gemini, keyed by the screen label
+    /// from CompanionScreenCapture (stable per display across ticks).
+    /// If a fresh capture is within the dHash threshold we skip the
+    /// upload — Gemini already has an equivalent frame. The cache is
+    /// cleared on session start and on `invalidateScreenshotHashCache()`
+    /// (called by CompanionManager when a tool call fails so we never
+    /// accidentally suppress a frame the model needs to re-see).
+    private var lastSentScreenshotHashByScreenLabel: [String: UInt64] = [:]
+
+    /// Tracks an in-flight reconnect attempt so a flurry of close events
+    /// doesn't kick off N parallel reconnects. Also lets us cancel the
+    /// reconnect cleanly if the user explicitly stops the session in the
+    /// middle of a backoff sleep.
+    private var reconnectTask: Task<Void, Never>?
+
+    /// Maximum number of reconnect attempts before giving up and surfacing
+    /// the failure to the user. Each attempt is wrapped in its own
+    /// exponential backoff via RetryWithExponentialBackoff, so total wall
+    /// time before fail-stop is roughly 1 + 2 + 4 = ~7 seconds for the
+    /// inner retries, multiplied by this many outer attempts.
+    private static let maxReconnectAttempts: Int = 3
+
     // MARK: - Init
 
     init(apiKeyURL: String, systemPrompt: String) {
@@ -154,12 +176,43 @@ final class GeminiLiveSession: ObservableObject {
             return
         }
 
-        let apiKey = try await fetchAPIKey()
+        // Both the key fetch and the WebSocket handshake are flaky network
+        // ops that fail individually about ~1% of the time (DNS hiccup,
+        // brief Cloudflare 5xx, TLS renegotiation). Wrap each in
+        // exponential backoff so a single transient blip doesn't kill
+        // the user's push-to-talk session before it even starts.
+        let apiKey = try await RetryWithExponentialBackoff.run(
+            maxAttempts: 3,
+            initialDelay: 0.5,
+            operationName: "GeminiLive.fetchAPIKey"
+        ) { [weak self] in
+            guard let self else {
+                throw NSError(domain: "GeminiLiveSession", code: -12,
+                              userInfo: [NSLocalizedDescriptionKey: "Session deallocated during key fetch"])
+            }
+            return try await self.fetchAPIKey()
+        }
 
-        try await geminiClient.connect(
-            apiKey: apiKey,
-            systemPrompt: systemPrompt
-        )
+        try await RetryWithExponentialBackoff.run(
+            maxAttempts: 3,
+            initialDelay: 0.5,
+            operationName: "GeminiLive.connect"
+        ) { [weak self] in
+            guard let self else {
+                throw NSError(domain: "GeminiLiveSession", code: -13,
+                              userInfo: [NSLocalizedDescriptionKey: "Session deallocated during WebSocket connect"])
+            }
+            try await self.geminiClient.connect(
+                apiKey: apiKey,
+                systemPrompt: self.systemPrompt
+            )
+        }
+
+        // Fresh session = fresh visual context. Drop any cached hashes
+        // from a previous session so the very first frame is always sent
+        // (otherwise restarting Clicky on the same unchanged screen would
+        // suppress the initial screenshot Gemini needs to see).
+        lastSentScreenshotHashByScreenLabel.removeAll()
 
         // Initial frame capture + send to Gemini so it has visual context
         // for the user's first utterance. Local resolver warmup (YOLO/OCR
@@ -188,6 +241,12 @@ final class GeminiLiveSession: ObservableObject {
     func stop() {
         guard isActive else { return }
 
+        // Cancel any in-flight reconnect first — otherwise it would race
+        // with this stop() and try to reopen the socket the user just
+        // asked to close.
+        reconnectTask?.cancel()
+        reconnectTask = nil
+
         stopPeriodicScreenshotUpdates()
         stopMicCapture()
         audioPlayer.stopAndClearQueue()
@@ -196,6 +255,88 @@ final class GeminiLiveSession: ObservableObject {
         isActive = false
         isModelSpeaking = false
         print("[GeminiLiveSession] Session stopped")
+    }
+
+    /// Attempt to re-open the WebSocket after an unexpected disconnect.
+    /// Re-runs the same connect flow (key fetch + setup) with retry/backoff,
+    /// then resumes the receive loop. The mic and audio player keep their
+    /// state across the reconnect so the user just sees a brief pause
+    /// rather than a torn-down session.
+    private func attemptReconnect() {
+        // De-dupe: if a reconnect is already in flight, do nothing.
+        guard reconnectTask == nil else {
+            print("[GeminiLiveSession] Reconnect already in progress — ignoring duplicate trigger")
+            return
+        }
+
+        // Pause periodic screenshots while disconnected — there's no
+        // socket to send them on. Mic stays running so we keep capturing
+        // user speech (it'll be lost during the gap, but the user will
+        // see the cursor go quiet and naturally stop speaking).
+        stopPeriodicScreenshotUpdates()
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            for outerAttempt in 1...Self.maxReconnectAttempts {
+                if Task.isCancelled { return }
+                print("[GeminiLiveSession] Reconnect attempt \(outerAttempt)/\(Self.maxReconnectAttempts)")
+                do {
+                    let apiKey = try await RetryWithExponentialBackoff.run(
+                        maxAttempts: 3,
+                        initialDelay: 0.5,
+                        operationName: "GeminiLive.fetchAPIKey(reconnect)"
+                    ) { [weak self] in
+                        guard let self else {
+                            throw NSError(domain: "GeminiLiveSession", code: -14,
+                                          userInfo: [NSLocalizedDescriptionKey: "Session deallocated during reconnect key fetch"])
+                        }
+                        return try await self.fetchAPIKey()
+                    }
+
+                    if Task.isCancelled { return }
+
+                    try await RetryWithExponentialBackoff.run(
+                        maxAttempts: 3,
+                        initialDelay: 0.5,
+                        operationName: "GeminiLive.connect(reconnect)"
+                    ) { [weak self] in
+                        guard let self else {
+                            throw NSError(domain: "GeminiLiveSession", code: -15,
+                                          userInfo: [NSLocalizedDescriptionKey: "Session deallocated during reconnect WebSocket"])
+                        }
+                        try await self.geminiClient.connect(
+                            apiKey: apiKey,
+                            systemPrompt: self.systemPrompt
+                        )
+                    }
+
+                    // Reconnect succeeded — restart the periodic screenshot
+                    // loop and force the next tick to send a fresh frame
+                    // (Gemini's server-side context was lost).
+                    self.lastSentScreenshotHashByScreenLabel.removeAll()
+                    self.startPeriodicScreenshotUpdates()
+                    self.reconnectTask = nil
+                    print("[GeminiLiveSession] Reconnect succeeded on outer attempt \(outerAttempt)")
+                    return
+                } catch {
+                    print("[GeminiLiveSession] Reconnect outer attempt \(outerAttempt) failed: \(error.localizedDescription)")
+                    // Outer-attempt cooldown so we don't immediately
+                    // hammer the same flaky server.
+                    if outerAttempt < Self.maxReconnectAttempts {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s
+                    }
+                }
+            }
+
+            // Out of attempts — give up and tear down the session so the
+            // user doesn't sit indefinitely staring at a dead overlay.
+            self.reconnectTask = nil
+            print("[GeminiLiveSession] Reconnect failed after \(Self.maxReconnectAttempts) outer attempts — stopping session")
+            self.onError?(NSError(domain: "GeminiLiveSession", code: -16,
+                                  userInfo: [NSLocalizedDescriptionKey: "Lost connection to Gemini Live and could not reconnect"]))
+            self.stop()
+        }
+        reconnectTask = task
     }
 
     // MARK: - Narration Mode
@@ -316,6 +457,12 @@ final class GeminiLiveSession: ObservableObject {
     /// AX tree lookup fails. Keeping this method lightweight is critical
     /// for audio stability: heavy periodic work starves Core Audio and
     /// causes Gemini's voice to stutter.
+    ///
+    /// Skips the WebSocket send when the new frame is perceptually
+    /// identical to the last one we sent for the same screen — see
+    /// ScreenshotPerceptualHash for the threshold rationale. We still
+    /// publish `latestCapture` so local consumers (cursor coordinate
+    /// mapping, YOLO cache lookups) keep seeing the freshest frame.
     private func captureAndProcessFrameForGemini() async {
         guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(),
               let primaryCapture = screenshots.first else {
@@ -323,7 +470,31 @@ final class GeminiLiveSession: ObservableObject {
         }
 
         latestCapture = primaryCapture
+
+        let screenLabel = primaryCapture.label
+        let newHash = ScreenshotPerceptualHash.perceptualHash(forJPEGData: primaryCapture.imageData)
+
+        if let newHash = newHash,
+           let lastHash = lastSentScreenshotHashByScreenLabel[screenLabel],
+           ScreenshotPerceptualHash.isSameScene(lastHash, newHash) {
+            // Scene hasn't meaningfully changed since we last sent it —
+            // skip the upload. Bandwidth, JPEG decode on Gemini's side,
+            // and per-image input tokens all saved.
+            return
+        }
+
+        if let newHash = newHash {
+            lastSentScreenshotHashByScreenLabel[screenLabel] = newHash
+        }
         geminiClient.sendScreenshot(primaryCapture.imageData)
+    }
+
+    /// Drop all cached perceptual hashes so the next periodic tick is
+    /// guaranteed to send a fresh frame. CompanionManager calls this when
+    /// a tool call fails ("can't find element") — Gemini might be working
+    /// from a stale frame, so we want to force-resync its visual context.
+    func invalidateScreenshotHashCache() {
+        lastSentScreenshotHashByScreenLabel.removeAll()
     }
 
     /// Decode JPEG Data into a CGImage for detector input.
@@ -492,6 +663,14 @@ final class GeminiLiveSession: ObservableObject {
 
         case .toolCall(let id, let name, let args):
             handleToolCall(id: id, name: name, args: args)
+
+        case .unexpectedDisconnect(let error):
+            // Server/network closed the socket without us asking. Try to
+            // reconnect rather than tearing the whole session down — the
+            // user is probably mid-utterance and a brief gap is far less
+            // disruptive than killing the overlay outright.
+            print("[GeminiLiveSession] Unexpected disconnect — \(error.localizedDescription); attempting reconnect")
+            attemptReconnect()
 
         case .error(let error):
             onError?(error)

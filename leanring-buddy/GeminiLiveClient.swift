@@ -43,6 +43,13 @@ enum GeminiLiveEvent {
     /// Gemini can continue its turn.
     case toolCall(id: String, name: String, args: [String: Any])
 
+    /// The WebSocket closed without us asking it to (server-initiated,
+    /// network drop, etc.). The session orchestrator listens for this
+    /// and may attempt to reconnect. Distinct from `.error` so the
+    /// session can choose to reconnect-and-stay-alive vs surface a
+    /// fatal failure to the user.
+    case unexpectedDisconnect(Error)
+
     /// Fatal connection error — client will disconnect
     case error(Error)
 }
@@ -82,6 +89,23 @@ final class GeminiLiveClient: @unchecked Sendable {
     private var receiveLoopTask: Task<Void, Never>?
     private var _isConnected: Bool = false
     private var _isSetupComplete: Bool = false
+
+    /// True between an explicit `disconnect()` call and the next `connect()`.
+    /// Used to distinguish "user closed" from "server died" inside the
+    /// receive loop's error handler — the former should NOT fire the
+    /// `.unexpectedDisconnect` event (we don't want to trigger a reconnect
+    /// when the user just released push-to-talk).
+    private var _wasIntentionallyDisconnected: Bool = false
+
+    /// Periodic no-op ping that prevents Gemini Live's silent idle
+    /// disconnect. Per Google's docs the server closes the socket after
+    /// roughly 30 minutes of inactivity; we send a benign clientContent
+    /// frame every 25 minutes to keep it warm. Cancelled on disconnect().
+    private var keepAlivePingTask: Task<Void, Never>?
+
+    /// Interval between keep-alive pings, in seconds. Pulled out of the
+    /// Task so it's easy to find and tweak.
+    private static let keepAlivePingInterval: TimeInterval = 25 * 60
 
     var isConnected: Bool {
         stateLock.withLock { _isConnected }
@@ -124,6 +148,10 @@ final class GeminiLiveClient: @unchecked Sendable {
         stateLock.withLock {
             self.webSocketTask = task
             self._isConnected = true
+            // Clear the intentional-disconnect flag now that we're starting
+            // a fresh connection. Any close from this point onward is
+            // either user-initiated (sets the flag again) or unexpected.
+            self._wasIntentionallyDisconnected = false
         }
         task.resume()
         print("[GeminiLive] WebSocket opened")
@@ -267,19 +295,63 @@ final class GeminiLiveClient: @unchecked Sendable {
         }
     }
 
-    /// Closes the WebSocket and cleans up state.
+    /// Closes the WebSocket and cleans up state. Marks the disconnect as
+    /// intentional so the receive loop won't fire `.unexpectedDisconnect`
+    /// on the way out.
     func disconnect() {
-        let (capturedReceiveTask, capturedWebSocketTask) = stateLock.withLock {
-            let taken = (receiveLoopTask, webSocketTask)
+        let (capturedReceiveTask, capturedWebSocketTask, capturedKeepAliveTask) = stateLock.withLock {
+            let taken = (receiveLoopTask, webSocketTask, keepAlivePingTask)
             receiveLoopTask = nil
             webSocketTask = nil
+            keepAlivePingTask = nil
             _isConnected = false
             _isSetupComplete = false
+            _wasIntentionallyDisconnected = true
             return taken
         }
         capturedReceiveTask?.cancel()
+        capturedKeepAliveTask?.cancel()
         capturedWebSocketTask?.cancel(with: .normalClosure, reason: nil)
         print("[GeminiLive] WebSocket closed")
+    }
+
+    // MARK: - Keep-Alive
+
+    /// Spin up a long-running task that fires a no-op clientContent ping
+    /// every `keepAlivePingInterval` seconds to keep Gemini's session
+    /// from silently idle-disconnecting. The ping is an empty turn —
+    /// the server accepts it without producing any audio response.
+    /// Cancels itself the moment the WebSocket goes away.
+    private func startKeepAlivePingLoop() {
+        // Cancel any prior ping task before starting a new one — happens
+        // on reconnects where setupComplete fires a second time.
+        let priorTask = stateLock.withLock { keepAlivePingTask }
+        priorTask?.cancel()
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.keepAlivePingInterval * 1_000_000_000))
+                if Task.isCancelled { return }
+                // Skip the ping if we've drifted out of the connected state.
+                guard self.isSetupComplete else { return }
+                let pingMessage: [String: Any] = [
+                    "clientContent": [
+                        "turns": [
+                            ["role": "user", "parts": [["text": ""]]]
+                        ],
+                        "turnComplete": false
+                    ]
+                ]
+                do {
+                    try await self.sendJSON(pingMessage)
+                    print("[GeminiLive] Sent keep-alive ping")
+                } catch {
+                    print("[GeminiLive] Keep-alive ping failed: \(error.localizedDescription)")
+                }
+            }
+        }
+        stateLock.withLock { keepAlivePingTask = task }
     }
 
     // MARK: - Sending Data
@@ -408,9 +480,19 @@ final class GeminiLiveClient: @unchecked Sendable {
                     await self.handleIncomingMessage(message)
                 } catch {
                     if !Task.isCancelled {
-                        print("[GeminiLive] Receive error: \(error.localizedDescription)")
-                        self.dispatchEvent(.error(error))
-                        self.disconnect()
+                        // Distinguish a user-initiated close from a
+                        // server/network-initiated one. The former is
+                        // expected (push-to-talk released, app quit) and
+                        // shouldn't surface anything; the latter should
+                        // give the session a chance to reconnect.
+                        let wasIntentional = self.stateLock.withLock { self._wasIntentionallyDisconnected }
+                        if wasIntentional {
+                            print("[GeminiLive] Receive loop ended after intentional disconnect")
+                        } else {
+                            print("[GeminiLive] Unexpected disconnect: \(error.localizedDescription)")
+                            self.dispatchEvent(.unexpectedDisconnect(error))
+                            self.disconnect()
+                        }
                     }
                     break
                 }
@@ -449,6 +531,7 @@ final class GeminiLiveClient: @unchecked Sendable {
         if json["setupComplete"] != nil {
             stateLock.withLock { _isSetupComplete = true }
             print("[GeminiLive] Setup complete")
+            startKeepAlivePingLoop()
             dispatchEvent(.setupComplete)
             return
         }
