@@ -321,7 +321,15 @@ class NativeElementDetector {
                     labelScore = max(labelScore, coverage)
                 }
             }
-            let combinedScore = proximityScore + (labelScore * 0.5)
+            // Weight YOLO's own confidence into the ranking. Low-
+            // confidence detections (shadows, text artifacts, partial
+            // icons) are often false positives; a slightly-further
+            // 0.85-confidence box almost always beats a very-close
+            // 0.3-confidence one. Scales proximity by 0.5 + conf/2 so a
+            // 1.0-confidence box scores at full proximity weight and a
+            // 0.0-confidence one at half.
+            let confidenceFactor = 0.5 + box.confidence / 2.0
+            let combinedScore = proximityScore * confidenceFactor + (labelScore * 0.5)
             return (box, combinedScore, labelScore > 0)
         }
 

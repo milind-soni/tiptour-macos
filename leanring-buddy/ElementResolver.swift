@@ -192,9 +192,12 @@ final class ElementResolver: @unchecked Sendable {
     }
 
     /// Full resolution pipeline: AX → YOLO → LLM coords, tried in order
-    /// with early exit. YOLO detection is run lazily: only if AX misses.
-    /// The caller can pass `runDetectorOnMiss: true` to automatically
-    /// populate the YOLO cache from `latestCapture` if it's empty.
+    /// with early exit. YOLO detection runs concurrently with the AX
+    /// walk so its result is already waiting if AX misses — the user-
+    /// visible latency for AX-miss cases drops from (axTime + yoloTime)
+    /// to max(axTime, yoloTime). When AX hits, we return immediately
+    /// and let the YOLO task finish in the background (it populates the
+    /// cache for a future call).
     func resolve(
         label: String,
         llmHintInScreenshotPixels: CGPoint?,
@@ -204,12 +207,54 @@ final class ElementResolver: @unchecked Sendable {
         proximityAnchorInGlobalScreen: CGPoint? = nil
     ) async -> Resolution? {
 
+        // Staleness check on the screenshot — resolving against a frame
+        // >1s old means the cursor is likely to land on an element that
+        // has moved or disappeared. Log so it shows up in traces; don't
+        // block, because even a stale frame often works.
+        if let capture = latestCapture {
+            let ageSeconds = Date().timeIntervalSince(capture.captureTimestamp)
+            if ageSeconds > 1.0 {
+                print("[ElementResolver] ⚠ screenshot is \(String(format: "%.2f", ageSeconds))s old — coords may have drifted for \"\(label)\"")
+            }
+        }
+
+        // Kick off YOLO+OCR detection in parallel with the AX walk so
+        // that IF AX misses, detection is already done (or nearly so)
+        // and we don't pay two serial waits. If AX hits first, we return
+        // and let this task finish on its own — its result lands in the
+        // detector's cache and benefits a future call.
+        //
+        // Skip the parallel detection entirely when the app is known to
+        // have an AX tree (common case) to avoid wasting CPU. The
+        // detector keeps a warm cache via its live-feed timer anyway.
+        let shouldPreloadDetection = runDetectorOnMiss
+            && latestCapture != nil
+            && AccessibilityTreeResolver.isAppKnownToLackAXTree(hint: targetAppHint)
+        let detectionTask: Task<Void, Never>?
+        if shouldPreloadDetection,
+           let capture = latestCapture,
+           let cgImage = CompanionManager.cgImage(from: capture.imageData) {
+            detectionTask = Task.detached(priority: .background) {
+                await NativeElementDetector.shared.detectElements(in: cgImage)
+            }
+        } else {
+            detectionTask = nil
+        }
+
         // 1. AX tree first — fastest and most reliable for native apps.
         //    Target app hint lets us bypass the system's "frontmost" when
         //    that's a background recorder (Cap) instead of the app the
         //    user is actually working in (e.g. Blender).
-        if let axResolution = await tryAccessibilityTree(label: label, targetAppHint: targetAppHint) {
-            return axResolution
+        //
+        //    Skip the walk entirely when we've already learned this app
+        //    has no AX tree (Blender/games/canvas apps). Saves 30-300ms
+        //    of wasted IPC on every subsequent pointing call and — more
+        //    importantly — the CPU that walk would burn while Gemini's
+        //    audio is streaming.
+        if !AccessibilityTreeResolver.isAppKnownToLackAXTree(hint: targetAppHint) {
+            if let axResolution = await tryAccessibilityTree(label: label, targetAppHint: targetAppHint) {
+                return axResolution
+            }
         }
 
         guard let capture = latestCapture else {
@@ -217,16 +262,18 @@ final class ElementResolver: @unchecked Sendable {
             return nil
         }
 
-        // 2. Warm the YOLO cache on the exact frame we have (only runs
-        //    if AX missed). Detached at `.background` priority so Core
-        //    Audio preempts the CoreML pass — otherwise sustained YOLO
-        //    inference can push HALC_ProxyIOContext into "skipping
-        //    cycle due to overload" and we hear breaks in Gemini's
-        //    voice playback. Detection ends up ~10-20% slower but the
-        //    user can't hear the difference; they can definitely hear
-        //    audio stutter.
-        if runDetectorOnMiss,
-           let cgImage = CompanionManager.cgImage(from: capture.imageData) {
+        // 2. If we didn't pre-launch detection (AX-supported app) but AX
+        //    still missed, run it now. Detached at `.background` priority
+        //    so Core Audio preempts the CoreML pass — otherwise sustained
+        //    YOLO inference can push HALC_ProxyIOContext into "skipping
+        //    cycle due to overload" and we hear breaks in Gemini's voice
+        //    playback. Detection ends up ~10-20% slower but the user
+        //    can't hear the difference; they can definitely hear audio
+        //    stutter.
+        if let detectionTask {
+            await detectionTask.value
+        } else if runDetectorOnMiss,
+                  let cgImage = CompanionManager.cgImage(from: capture.imageData) {
             await Task.detached(priority: .background) {
                 await NativeElementDetector.shared.detectElements(in: cgImage)
             }.value
