@@ -48,6 +48,14 @@ final class WorkflowRunner: ObservableObject {
     private var pointHandlerForActivePlan: ((ElementResolver.Resolution) -> Void)?
     private var latestCaptureForActivePlan: CompanionScreenCapture?
 
+    /// The previously-resolved step's global screen coordinate. Passed
+    /// to `ElementResolver.resolve` as a proximity anchor so that when
+    /// the current step's label (e.g. "New") matches multiple places
+    /// on screen, we prefer the one closest to where the user just
+    /// clicked — effectively "follow the menu chain" without modeling
+    /// parent-child structure explicitly.
+    private var previousStepResolvedGlobalScreenPoint: CGPoint?
+
     /// Cancels any in-flight resolution loop when the user skips, stops,
     /// or the plan advances for another reason.
     private var activeStepResolutionTask: Task<Void, Never>?
@@ -107,6 +115,8 @@ final class WorkflowRunner: ObservableObject {
         currentStepResolutionFailureLabel = nil
         pointHandlerForActivePlan = pointHandler
         latestCaptureForActivePlan = latestCapture
+        // Fresh plan — no prior step to bias toward.
+        previousStepResolvedGlobalScreenPoint = nil
         print("[Workflow] starting \"\(plan.goal)\" — \(plan.steps.count) step(s)")
 
         // For step 1 the incoming `latestCapture` can be several seconds
@@ -144,6 +154,7 @@ final class WorkflowRunner: ObservableObject {
         currentStepResolutionFailureLabel = nil
         pointHandlerForActivePlan = nil
         latestCaptureForActivePlan = nil
+        previousStepResolvedGlobalScreenPoint = nil
         ClickDetector.shared.disarm()
         print("[Workflow] stopped")
     }
@@ -290,7 +301,8 @@ final class WorkflowRunner: ObservableObject {
                    llmHintInScreenshotPixels: activeStep?.hintCoordinate,
                    latestCapture: capture,
                    targetAppHint: activePlan?.app,
-                   runDetectorOnMiss: true
+                   runDetectorOnMiss: true,
+                   proximityAnchorInGlobalScreen: previousStepResolvedGlobalScreenPoint
                ) {
                 if Task.isCancelled { return }
                 armCursorAndClickDetector(with: resolution, pickingFrom: latestAllCaptures)
@@ -323,6 +335,14 @@ final class WorkflowRunner: ObservableObject {
         }) {
             latestCaptureForActivePlan = matchingCapture
         }
+
+        // Remember this step's resolved point so the NEXT step's
+        // resolution can tie-break multiple label matches in favor of
+        // the one closest to where we just clicked. That's how nested
+        // menu resolution stays correct without modeling parent-child
+        // structure — "New" near the just-opened File menu beats a
+        // stray "New Tab" button elsewhere on screen.
+        previousStepResolvedGlobalScreenPoint = resolution.globalScreenPoint
 
         // Arm the detector BEFORE handing the cursor the new resolution.
         // The cursor flight takes ~500ms and a fast user can click the

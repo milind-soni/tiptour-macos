@@ -97,14 +97,27 @@ final class ElementResolver: @unchecked Sendable {
     func tryYOLO(
         label: String,
         llmHintInScreenshotPixels: CGPoint?,
-        capture: CompanionScreenCapture
+        capture: CompanionScreenCapture,
+        proximityAnchorInGlobalScreen: CGPoint? = nil
     ) async -> Resolution? {
+        // If we have a proximity anchor (previous step's resolved
+        // point), convert it into screenshot-pixel space so the
+        // detector can use it to tie-break between multiple equally-
+        // scoring label matches.
+        let proximityAnchorInScreenshotPixels = proximityAnchorInGlobalScreen.map {
+            globalScreenPointToScreenshotPixel($0, capture: capture)
+        }
+
         // Label-only match — this is what worked well in the Claude-mode
         // version: OCR finds the text "File", YOLO finds the button
         // bounding box containing it, we use the button's center.
-        if let labelMatch = NativeElementDetector.shared.findFromCache(query: label) {
+        if let labelMatch = NativeElementDetector.shared.findFromCache(
+            query: label,
+            preferMatchesNearPixel: proximityAnchorInScreenshotPixels
+        ) {
             let globalPoint = screenshotPixelToGlobalScreen(labelMatch.center, capture: capture)
-            print("[ElementResolver] ✓ YOLO label-match \"\(label)\" → \"\(labelMatch.label)\" at \(globalPoint)")
+            let anchorLogNote = proximityAnchorInScreenshotPixels != nil ? " (proximity-biased)" : ""
+            print("[ElementResolver] ✓ YOLO label-match \"\(label)\" → \"\(labelMatch.label)\" at \(globalPoint)\(anchorLogNote)")
             return Resolution(
                 globalScreenPoint: globalPoint,
                 displayFrame: capture.displayFrame,
@@ -187,7 +200,8 @@ final class ElementResolver: @unchecked Sendable {
         llmHintInScreenshotPixels: CGPoint?,
         latestCapture: CompanionScreenCapture?,
         targetAppHint: String? = nil,
-        runDetectorOnMiss: Bool = true
+        runDetectorOnMiss: Bool = true,
+        proximityAnchorInGlobalScreen: CGPoint? = nil
     ) async -> Resolution? {
 
         // 1. AX tree first — fastest and most reliable for native apps.
@@ -218,11 +232,17 @@ final class ElementResolver: @unchecked Sendable {
             }.value
         }
 
-        // 3. YOLO label-only or hint-refined match.
+        // 3. YOLO label-only or hint-refined match. The proximity
+        //    anchor (previous step's resolved screen point) lets the
+        //    detector tie-break between multiple equal label matches
+        //    in favor of the one closest to where we just clicked —
+        //    fixes nested-menu ambiguity (e.g. "New" in an open File
+        //    menu vs "New Tab" elsewhere on screen).
         if let yoloResolution = await tryYOLO(
             label: label,
             llmHintInScreenshotPixels: llmHintInScreenshotPixels,
-            capture: capture
+            capture: capture,
+            proximityAnchorInGlobalScreen: proximityAnchorInGlobalScreen
         ) {
             return yoloResolution
         }
@@ -263,6 +283,31 @@ final class ElementResolver: @unchecked Sendable {
             x: displayLocalX + displayFrame.origin.x,
             y: appKitY + displayFrame.origin.y
         )
+    }
+
+    /// Inverse of `screenshotPixelToGlobalScreen`. Maps a global AppKit
+    /// point (bottom-left origin, spans all displays) back into the
+    /// screenshot's pixel coordinate space (top-left origin). Used to
+    /// pass a proximity anchor from global-screen-land into the
+    /// detector's pixel-space tie-breaker.
+    private func globalScreenPointToScreenshotPixel(
+        _ globalPoint: CGPoint,
+        capture: CompanionScreenCapture
+    ) -> CGPoint {
+        let screenshotWidth = CGFloat(capture.screenshotWidthInPixels)
+        let screenshotHeight = CGFloat(capture.screenshotHeightInPixels)
+        let displayWidth = CGFloat(capture.displayWidthInPoints)
+        let displayHeight = CGFloat(capture.displayHeightInPoints)
+        let displayFrame = capture.displayFrame
+
+        let displayLocalX = globalPoint.x - displayFrame.origin.x
+        let appKitY = globalPoint.y - displayFrame.origin.y
+        let displayLocalY = displayHeight - appKitY
+
+        let pixelX = displayLocalX * (screenshotWidth / displayWidth)
+        let pixelY = displayLocalY * (screenshotHeight / displayHeight)
+
+        return CGPoint(x: pixelX, y: pixelY)
     }
 
     /// Find the NSScreen whose frame contains the given global AppKit point.

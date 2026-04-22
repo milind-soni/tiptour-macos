@@ -355,7 +355,15 @@ class NativeElementDetector {
     }
 
     /// Find from cache only (instant, no detection). Returns nil if cache is stale (>3s).
-    func findFromCache(query: String) -> FoundElement? {
+    ///
+    /// `preferMatchesNearPixel` — optional anchor in SCREENSHOT-PIXEL
+    /// coordinates. When multiple OCR matches score equally for the
+    /// query (e.g., the word "New" appears in both an open File menu
+    /// and a "New Tab" button elsewhere on screen), the candidate
+    /// closest to this anchor wins. Callers use this to bias nested-
+    /// menu resolution toward elements near the previously-clicked
+    /// element.
+    func findFromCache(query: String, preferMatchesNearPixel: CGPoint? = nil) -> FoundElement? {
         cacheLock.lock()
         let elements = cachedElements
         let timestamp = cacheTimestamp
@@ -364,7 +372,11 @@ class NativeElementDetector {
         let ageMs = Int(Date().timeIntervalSince(timestamp) * 1000)
         if ageMs > 3000 { return nil }
 
-        return matchElement(query: query, elements: elements)
+        return matchElement(
+            query: query,
+            elements: elements,
+            preferMatchesNearPixel: preferMatchesNearPixel
+        )
     }
 
     /// Match a query string against detected elements.
@@ -397,7 +409,38 @@ class NativeElementDetector {
         return (full: lower, words: Set(meaningfulWords.isEmpty ? rawWords : meaningfulWords))
     }
 
-    private func matchElement(query: String, elements: [DetectedElement]) -> FoundElement? {
+    /// Among candidates sharing the top score, pick the one closest to
+    /// the proximity anchor (if any). Returns nil when the input is
+    /// empty. When the anchor is nil or there's only one top-scored
+    /// candidate, returns the first max-scored element (original
+    /// behavior — preserves backward compatibility for callers that
+    /// don't provide an anchor).
+    private static func pickBestCandidate(
+        from scoredMatches: [(element: DetectedElement, score: Int)],
+        preferMatchesNearPixel: CGPoint?
+    ) -> DetectedElement? {
+        guard let topScore = scoredMatches.map(\.score).max() else { return nil }
+        let topCandidates = scoredMatches.filter { $0.score == topScore }
+        guard !topCandidates.isEmpty else { return nil }
+
+        if let anchor = preferMatchesNearPixel, topCandidates.count > 1 {
+            let closest = topCandidates.min { lhs, rhs in
+                let distanceLhs = hypot(lhs.element.center.x - anchor.x, lhs.element.center.y - anchor.y)
+                let distanceRhs = hypot(rhs.element.center.x - anchor.x, rhs.element.center.y - anchor.y)
+                return distanceLhs < distanceRhs
+            }
+            if let closest {
+                return closest.element
+            }
+        }
+        return topCandidates.first?.element
+    }
+
+    private func matchElement(
+        query: String,
+        elements: [DetectedElement],
+        preferMatchesNearPixel: CGPoint? = nil
+    ) -> FoundElement? {
         let queryLower = query.lowercased()
         let normalizedQuery = Self.normalizeQuery(query)
 
@@ -444,7 +487,16 @@ class NativeElementDetector {
             return nil
         }
 
-        guard let bestOcrMatch = scoredOcrMatches.max(by: { $0.score < $1.score })?.element else {
+        // Pick the highest-scoring candidate. When a proximity anchor
+        // is provided AND multiple candidates tie for the top score
+        // (common for nested-menu resolution — "New" can appear in
+        // both the just-opened File menu and in an unrelated button
+        // elsewhere), pick the one closest to the anchor. Without an
+        // anchor, fall back to the original "first max" behavior.
+        guard let bestOcrMatch = Self.pickBestCandidate(
+            from: scoredOcrMatches,
+            preferMatchesNearPixel: preferMatchesNearPixel
+        ) else {
             return nil
         }
 
