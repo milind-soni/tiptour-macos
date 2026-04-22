@@ -207,7 +207,7 @@ final class GeminiLiveSession: ObservableObject {
 
         // Fresh session = fresh visual context. Drop any cached hashes
         // from a previous session so the very first frame is always sent
-        // (otherwise restarting Clicky on the same unchanged screen would
+        // (otherwise restarting TipTour on the same unchanged screen would
         // suppress the initial screenshot Gemini needs to see).
         lastSentScreenshotHashByScreenLabel.removeAll()
 
