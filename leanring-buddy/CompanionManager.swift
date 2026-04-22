@@ -619,6 +619,11 @@ final class CompanionManager: ObservableObject {
         let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
         guard let resolution else {
             print("[Tool] ✗ point_at_element(\"\(label)\") → no match after \(elapsed)ms")
+            // Force a fresh screenshot on the next periodic tick. If Gemini
+            // was working from a stale frame (e.g. menu just opened, dialog
+            // just appeared), the perceptual-hash dedup might otherwise
+            // suppress the very frame Gemini needs to re-look at.
+            geminiLiveSession.invalidateScreenshotHashCache()
             return ["ok": false, "reason": "element_not_found", "label": label]
         }
         print("[Tool] ✓ point_at_element(\"\(label)\") → \(resolution.label) via \(resolution.source) in \(elapsed)ms")
