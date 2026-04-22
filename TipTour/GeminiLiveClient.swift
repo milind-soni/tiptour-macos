@@ -563,6 +563,14 @@ final class GeminiLiveClient: @unchecked Sendable {
             return
         }
 
+        // 5. sessionResumptionUpdate — Gemini 3.1 Flash Live sends periodic
+        // resume tokens we could use to reconnect after a drop. We're not
+        // implementing resumption yet, so silently accept and ignore
+        // instead of spamming "Unhandled message" logs every few seconds.
+        if json["sessionResumptionUpdate"] != nil {
+            return
+        }
+
         // Unknown message shape — log and move on
         print("[GeminiLive] Unhandled message: \(json.keys)")
     }

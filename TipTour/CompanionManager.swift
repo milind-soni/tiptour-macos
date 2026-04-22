@@ -580,9 +580,31 @@ final class CompanionManager: ObservableObject {
         session.onOutputTranscript = { [weak self] fullTranscript in
             self?.handleGeminiTranscriptUpdate(fullTranscript)
         }
+
+        // Reset the per-turn dedup flag when a NEW user utterance starts
+        // (transcript was empty, now has chars). This is the right signal
+        // for "user has something new to ask" — onTurnComplete is the
+        // wrong signal because ambient noise / background speech / the
+        // cat's audio spillover can re-trigger Gemini as a fake new turn
+        // and double-fire tool calls without an actual new utterance.
+        session.onInputTranscriptUpdate = { [weak self] fullInputTranscript in
+            guard let self else { return }
+            let isNewUtterance = fullInputTranscript.trimmingCharacters(in: .whitespacesAndNewlines).count > 0
+                && self.previousInputTranscriptLength == 0
+            if isNewUtterance {
+                self.planAppliedThisTurn = false
+                self.lastGeminiTranscriptLength = 0
+            }
+            self.previousInputTranscriptLength = fullInputTranscript.count
+        }
+
         session.onTurnComplete = { [weak self] in
-            self?.lastGeminiTranscriptLength = 0
-            self?.planAppliedThisTurn = false
+            // Input transcript will reset to "" in GeminiLiveSession on
+            // turnComplete; mirror that here so the next utterance looks
+            // like a fresh start to our length counter.
+            self?.previousInputTranscriptLength = 0
+            // Intentionally NO reset of planAppliedThisTurn here — see
+            // the onInputTranscriptUpdate block above.
         }
         session.onError = { error in
             print("[GeminiLive] Error: \(error.localizedDescription)")
@@ -626,6 +648,13 @@ final class CompanionManager: ObservableObject {
         }
         print("[Tool] ✓ point_at_element(\"\(label)\") → \(resolution.label) via \(resolution.source) in \(elapsed)ms")
         pointAtResolution(resolution)
+
+        // point_at_element is a single-click ask — there's no multi-step
+        // flow expecting a click. Disarm any leftover ClickDetector state
+        // from a previous workflow so stale armed rects don't misreport
+        // later clicks as missed hits on the wrong target.
+        ClickDetector.shared.disarm()
+
         return [
             "ok": true,
             "label": resolution.label,
@@ -784,6 +813,12 @@ final class CompanionManager: ObservableObject {
     /// Track whether a plan has already been applied this turn so the
     /// transcript-tag path doesn't overwrite it with a stale [POINT:].
     private var planAppliedThisTurn: Bool = false
+
+    /// Tracks how long the input transcript was on the last update so
+    /// we can detect "transcript went from empty → non-empty" — the
+    /// reliable signal that a new user utterance just began. See the
+    /// onInputTranscriptUpdate hook in the session setup for why.
+    private var previousInputTranscriptLength: Int = 0
 
 
     func setSelectedModel(_ model: String) {

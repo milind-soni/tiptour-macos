@@ -55,6 +55,13 @@ final class GeminiLiveSession: ObservableObject {
     /// parse it for [POINT:] tags and trigger cursor pointing.
     var onOutputTranscript: ((String) -> Void)?
 
+    /// Fires whenever new input transcript text arrives (the user's speech
+    /// as Gemini heard it). CompanionManager uses this to detect "a new
+    /// utterance just began" so the per-turn dedup flag resets at the
+    /// right moment — NOT on model turn-complete, which false-fires when
+    /// ambient noise re-triggers Gemini.
+    var onInputTranscriptUpdate: ((String) -> Void)?
+
     /// Fires when the model finishes its turn.
     var onTurnComplete: (() -> Void)?
 
@@ -586,6 +593,7 @@ final class GeminiLiveSession: ObservableObject {
             // Gemini sends incremental transcripts — accumulate them so the
             // UI sees the full utterance as it builds up.
             inputTranscript += text
+            onInputTranscriptUpdate?(inputTranscript)
 
         case .outputTranscript(let text):
             outputTranscript += text
