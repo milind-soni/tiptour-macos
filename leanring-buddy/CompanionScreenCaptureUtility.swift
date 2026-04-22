@@ -1,6 +1,6 @@
 //
 //  CompanionScreenCaptureUtility.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Standalone screenshot capture for the companion voice flow.
 //  Decoupled from the legacy ScreenshotManager so the companion mode
@@ -19,6 +19,10 @@ struct CompanionScreenCapture {
     let displayFrame: CGRect
     let screenshotWidthInPixels: Int
     let screenshotHeightInPixels: Int
+    /// When this frame was captured. Used by ElementResolver to warn
+    /// when resolution runs against a stale screenshot — large drift
+    /// means the cursor is likely to land on a moved/gone element.
+    let captureTimestamp: Date
 }
 
 @MainActor
@@ -118,7 +122,8 @@ enum CompanionScreenCaptureUtility {
                 displayHeightInPoints: Int(displayFrame.height),
                 displayFrame: displayFrame,
                 screenshotWidthInPixels: configuration.width,
-                screenshotHeightInPixels: configuration.height
+                screenshotHeightInPixels: configuration.height,
+                captureTimestamp: Date()
             ))
         }
 

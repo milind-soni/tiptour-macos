@@ -1,6 +1,6 @@
 //
 //  ElevenLabsTTSClient.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Streams text-to-speech audio from ElevenLabs and plays it back
 //  through the system audio output. Uses the streaming endpoint so

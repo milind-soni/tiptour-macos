@@ -1,6 +1,6 @@
 //
 //  ClickDetector.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Listens for global left-mouse-down events and fires a callback if
 //  the click lands inside (or within a small tolerance of) the currently

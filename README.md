@@ -2,7 +2,7 @@
 
 AI-powered software teacher that lives next to your cursor. It can see your screen, listen to you, talk back, and point at exactly what you need to click — across any app on your Mac.
 
-Built on top of [Clicky](https://github.com/farzaa/clicky) (open source, by [@farzatv](https://x.com/farzatv)).
+A macOS menu bar companion that teaches you software by voice.
 
 ## What it does
 
@@ -12,7 +12,7 @@ Built on top of [Clicky](https://github.com/farzaa/clicky) (open source, by [@fa
 - **Points at UI elements** — cursor flies to exactly what you need to click
 - **Multi-step guidance** — walks you through workflows step by step
 
-## What we're adding (beyond Clicky)
+## What it does
 
 - **Accessibility tree intelligence** — exact element positions from macOS AX API, not just screenshot guessing
 - **Structured multi-step workflows** — Claude returns `guide_user` tool calls with sequential steps
@@ -94,7 +94,7 @@ Extracts timestamped steps from video transcripts using Gemini AI. Output is a J
 
 ## Credits
 
-- [Clicky](https://github.com/farzaa/clicky) by Farza — the foundation
+
 - Gemini Live (Google) — realtime voice + vision + tool calling
 - Claude by Anthropic — vision + reasoning in the legacy mode
 - ElevenLabs — text-to-speech in the legacy mode

@@ -1,6 +1,6 @@
 //
 //  OverlayWindow.swift
-//  leanring-buddy
+//  TipTour
 //
 //  System-wide transparent overlay window for blue glowing cursor.
 //  One OverlayWindow is created per screen so the cursor buddy
@@ -200,7 +200,7 @@ struct BlueCursorView: View {
     private let onboardingVideoPlayerWidth: CGFloat = 330
     private let onboardingVideoPlayerHeight: CGFloat = 186
 
-    private let fullWelcomeMessage = "hey! i'm clicky"
+    private let fullWelcomeMessage = "hey! i'm tiptour"
 
     private let navigationPointerPhrases = [
         "right here!",

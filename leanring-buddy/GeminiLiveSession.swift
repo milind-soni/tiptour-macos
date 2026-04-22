@@ -1,6 +1,6 @@
 //
 //  GeminiLiveSession.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Orchestrates a full Gemini Live conversation session:
 //    1. Opens a WebSocket to Gemini via GeminiLiveClient
@@ -139,18 +139,15 @@ final class GeminiLiveSession: ObservableObject {
     /// accidentally suppress a frame the model needs to re-see).
     private var lastSentScreenshotHashByScreenLabel: [String: UInt64] = [:]
 
-    /// Tracks an in-flight reconnect attempt so a flurry of close events
-    /// doesn't kick off N parallel reconnects. Also lets us cancel the
-    /// reconnect cleanly if the user explicitly stops the session in the
-    /// middle of a backoff sleep.
-    private var reconnectTask: Task<Void, Never>?
+    /// Whether a reconnect attempt is in progress. Prevents the error
+    /// path from reporting a fatal error while we're still trying to
+    /// recover transparently.
+    private var reconnectInFlight: Bool = false
 
-    /// Maximum number of reconnect attempts before giving up and surfacing
-    /// the failure to the user. Each attempt is wrapped in its own
-    /// exponential backoff via RetryWithExponentialBackoff, so total wall
-    /// time before fail-stop is roughly 1 + 2 + 4 = ~7 seconds for the
-    /// inner retries, multiplied by this many outer attempts.
-    private static let maxReconnectAttempts: Int = 3
+    /// Reconnect attempt counter — resets to zero on successful connect
+    /// and caps the exponential backoff at a sane ceiling.
+    private var reconnectAttemptIndex: Int = 0
+    private static let maxReconnectAttempts: Int = 5
 
     // MARK: - Init
 
@@ -241,12 +238,6 @@ final class GeminiLiveSession: ObservableObject {
     func stop() {
         guard isActive else { return }
 
-        // Cancel any in-flight reconnect first — otherwise it would race
-        // with this stop() and try to reopen the socket the user just
-        // asked to close.
-        reconnectTask?.cancel()
-        reconnectTask = nil
-
         stopPeriodicScreenshotUpdates()
         stopMicCapture()
         audioPlayer.stopAndClearQueue()
@@ -255,88 +246,6 @@ final class GeminiLiveSession: ObservableObject {
         isActive = false
         isModelSpeaking = false
         print("[GeminiLiveSession] Session stopped")
-    }
-
-    /// Attempt to re-open the WebSocket after an unexpected disconnect.
-    /// Re-runs the same connect flow (key fetch + setup) with retry/backoff,
-    /// then resumes the receive loop. The mic and audio player keep their
-    /// state across the reconnect so the user just sees a brief pause
-    /// rather than a torn-down session.
-    private func attemptReconnect() {
-        // De-dupe: if a reconnect is already in flight, do nothing.
-        guard reconnectTask == nil else {
-            print("[GeminiLiveSession] Reconnect already in progress — ignoring duplicate trigger")
-            return
-        }
-
-        // Pause periodic screenshots while disconnected — there's no
-        // socket to send them on. Mic stays running so we keep capturing
-        // user speech (it'll be lost during the gap, but the user will
-        // see the cursor go quiet and naturally stop speaking).
-        stopPeriodicScreenshotUpdates()
-
-        let task = Task { [weak self] in
-            guard let self else { return }
-            for outerAttempt in 1...Self.maxReconnectAttempts {
-                if Task.isCancelled { return }
-                print("[GeminiLiveSession] Reconnect attempt \(outerAttempt)/\(Self.maxReconnectAttempts)")
-                do {
-                    let apiKey = try await RetryWithExponentialBackoff.run(
-                        maxAttempts: 3,
-                        initialDelay: 0.5,
-                        operationName: "GeminiLive.fetchAPIKey(reconnect)"
-                    ) { [weak self] in
-                        guard let self else {
-                            throw NSError(domain: "GeminiLiveSession", code: -14,
-                                          userInfo: [NSLocalizedDescriptionKey: "Session deallocated during reconnect key fetch"])
-                        }
-                        return try await self.fetchAPIKey()
-                    }
-
-                    if Task.isCancelled { return }
-
-                    try await RetryWithExponentialBackoff.run(
-                        maxAttempts: 3,
-                        initialDelay: 0.5,
-                        operationName: "GeminiLive.connect(reconnect)"
-                    ) { [weak self] in
-                        guard let self else {
-                            throw NSError(domain: "GeminiLiveSession", code: -15,
-                                          userInfo: [NSLocalizedDescriptionKey: "Session deallocated during reconnect WebSocket"])
-                        }
-                        try await self.geminiClient.connect(
-                            apiKey: apiKey,
-                            systemPrompt: self.systemPrompt
-                        )
-                    }
-
-                    // Reconnect succeeded — restart the periodic screenshot
-                    // loop and force the next tick to send a fresh frame
-                    // (Gemini's server-side context was lost).
-                    self.lastSentScreenshotHashByScreenLabel.removeAll()
-                    self.startPeriodicScreenshotUpdates()
-                    self.reconnectTask = nil
-                    print("[GeminiLiveSession] Reconnect succeeded on outer attempt \(outerAttempt)")
-                    return
-                } catch {
-                    print("[GeminiLiveSession] Reconnect outer attempt \(outerAttempt) failed: \(error.localizedDescription)")
-                    // Outer-attempt cooldown so we don't immediately
-                    // hammer the same flaky server.
-                    if outerAttempt < Self.maxReconnectAttempts {
-                        try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s
-                    }
-                }
-            }
-
-            // Out of attempts — give up and tear down the session so the
-            // user doesn't sit indefinitely staring at a dead overlay.
-            self.reconnectTask = nil
-            print("[GeminiLiveSession] Reconnect failed after \(Self.maxReconnectAttempts) outer attempts — stopping session")
-            self.onError?(NSError(domain: "GeminiLiveSession", code: -16,
-                                  userInfo: [NSLocalizedDescriptionKey: "Lost connection to Gemini Live and could not reconnect"]))
-            self.stop()
-        }
-        reconnectTask = task
     }
 
     // MARK: - Narration Mode
@@ -670,12 +579,74 @@ final class GeminiLiveSession: ObservableObject {
             // user is probably mid-utterance and a brief gap is far less
             // disruptive than killing the overlay outright.
             print("[GeminiLiveSession] Unexpected disconnect — \(error.localizedDescription); attempting reconnect")
-            attemptReconnect()
+            guard isActive, !reconnectInFlight else { return }
+            Task { await self.attemptReconnect(after: error) }
 
         case .error(let error):
-            onError?(error)
-            stop()
+            // Transparent reconnect before propagating: network blips and
+            // the server's ~15min session ceiling otherwise force the user
+            // to restart a live conversation. Only surface the error if
+            // every retry fails or the session was already being torn
+            // down deliberately (isActive == false).
+            guard isActive, !reconnectInFlight else {
+                onError?(error)
+                stop()
+                return
+            }
+            Task { await self.attemptReconnect(after: error) }
         }
+    }
+
+    /// Try to re-establish the WebSocket with exponential backoff. Keeps
+    /// the audio player and published state intact so the user doesn't
+    /// see a "session ended" flash — just a brief gap in mic streaming
+    /// until the reconnect lands.
+    private func attemptReconnect(after originalError: Error) async {
+        reconnectInFlight = true
+        defer { reconnectInFlight = false }
+
+        // Tear down just the transport bits. Keep `isActive = true` so the
+        // rest of the app treats this as a live session the whole time.
+        stopPeriodicScreenshotUpdates()
+        stopMicCapture()
+        geminiClient.disconnect()
+
+        while reconnectAttemptIndex < Self.maxReconnectAttempts {
+            reconnectAttemptIndex += 1
+            let backoffSeconds = pow(2.0, Double(reconnectAttemptIndex - 1)) * 0.5
+            print("[GeminiLiveSession] 🔁 reconnect attempt \(reconnectAttemptIndex)/\(Self.maxReconnectAttempts) in \(backoffSeconds)s")
+            try? await Task.sleep(nanoseconds: UInt64(backoffSeconds * 1_000_000_000))
+
+            // If the user explicitly stopped the session while we were
+            // waiting, bail out silently.
+            guard isActive else {
+                print("[GeminiLiveSession] reconnect aborted — session no longer active")
+                return
+            }
+
+            do {
+                let apiKey = try await fetchAPIKey()
+                try await geminiClient.connect(apiKey: apiKey, systemPrompt: systemPrompt)
+                // Gemini's server-side context was lost — force the next
+                // tick to send a fresh frame regardless of hash.
+                lastSentScreenshotHashByScreenLabel.removeAll()
+                await captureAndProcessFrameForGemini()
+                try startMicCapture()
+                audioPlayer.startEngine()
+                startPeriodicScreenshotUpdates()
+                reconnectAttemptIndex = 0
+                print("[GeminiLiveSession] ✅ reconnected successfully")
+                return
+            } catch {
+                print("[GeminiLiveSession] reconnect attempt \(reconnectAttemptIndex) failed: \(error.localizedDescription)")
+            }
+        }
+
+        // Exhausted all retries — now surface the original error.
+        reconnectAttemptIndex = 0
+        print("[GeminiLiveSession] ✗ reconnect exhausted — reporting error")
+        onError?(originalError)
+        stop()
     }
 
     // MARK: - Tool Call Dispatch

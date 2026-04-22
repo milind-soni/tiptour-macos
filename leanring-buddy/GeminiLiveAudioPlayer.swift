@@ -1,6 +1,6 @@
 //
 //  GeminiLiveAudioPlayer.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Streams PCM16 audio chunks from Gemini Live to the speakers in real time.
 //  Uses AVAudioEngine with a scheduled buffer queue so chunks play back
@@ -109,6 +109,14 @@ final class GeminiLiveAudioPlayer {
     private func makeAudioBuffer(from pcm16Data: Data) -> AVAudioPCMBuffer? {
         let bytesPerFrame = Int(streamAudioFormat.streamDescription.pointee.mBytesPerFrame)
         guard bytesPerFrame > 0 else { return nil }
+        // PCM16 mono => byte count must be divisible by 2. If Gemini ever
+        // sends a different format (stereo, PCM24, server-side change),
+        // the raw bytes will produce scrambled audio or a silently-dropped
+        // buffer. Reject and log instead of schedule-and-hope.
+        guard pcm16Data.count % bytesPerFrame == 0 else {
+            print("[GeminiLiveAudio] ⚠ dropped \(pcm16Data.count)-byte chunk — not a multiple of \(bytesPerFrame) bytes/frame. Audio format may have changed upstream.")
+            return nil
+        }
         let frameCount = pcm16Data.count / bytesPerFrame
         guard frameCount > 0 else { return nil }
 

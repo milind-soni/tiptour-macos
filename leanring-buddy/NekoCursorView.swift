@@ -1,6 +1,6 @@
 //
 //  NekoCursorView.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Pixel-art cat that replaces the blue triangle cursor in Neko mode.
 //  Based on the classic oneko sprites (Masayuki Koba, 1989), vendored

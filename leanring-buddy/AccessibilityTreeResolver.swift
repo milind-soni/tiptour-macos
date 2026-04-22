@@ -1,6 +1,6 @@
 //
 //  AccessibilityTreeResolver.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Walks the macOS Accessibility (AX) tree of the frontmost app and looks
 //  up UI elements by title. Returns pixel-perfect frames from the app's
@@ -135,10 +135,10 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
     }
 
     /// The bundle ID of our own app — we NEVER query our own AX tree
-    /// because opening the menu bar panel makes Clicky briefly frontmost
+    /// because opening the menu bar panel makes TipTour briefly frontmost
     /// and the panel's tree has nothing to do with what the user is
     /// actually looking at. Skipping ourselves forces the resolver to
-    /// use the LAST foreground app before Clicky took focus.
+    /// use the LAST foreground app before TipTour took focus.
     private static var ownBundleID: String? {
         Bundle.main.bundleIdentifier
     }
@@ -146,7 +146,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
     /// Snapshot of the user's real frontmost app at the moment the hotkey
     /// was pressed. Set by CompanionManager.handleShortcutTransition at
     /// press time — before any of our UI shows — so we always know
-    /// which app the user was actually looking at, even after Clicky's
+    /// which app the user was actually looking at, even after TipTour's
     /// menu bar panel takes focus.
     nonisolated(unsafe) static var userTargetAppOverride: NSRunningApplication?
 
@@ -201,7 +201,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
     ///      skipping our own app.
     ///   3. NSWorkspace.frontmostApplication (skipping our own).
     ///   4. Most recently active running app that isn't us — covers the
-    ///      case where pressing the hotkey momentarily made Clicky
+    ///      case where pressing the hotkey momentarily made TipTour
     ///      frontmost.
     private func resolveTargetApp(hint: String?) -> (AXUIElement?, String?) {
         if let hint, !hint.isEmpty, hint.lowercased() != "unknown" {
@@ -362,29 +362,44 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
                     description: attrs.description,
                     value: attrs.value,
                     help: attrs.help
-                ), score > 0,
-                   let frame = attrs.frame,
-                   frame.width > 0, frame.height > 0 {
-                    // Reject absurd frames — a legitimate clickable
-                    // target (menu item, button, tab, checkbox) is
-                    // almost always under 800pt in either dimension.
-                    // Anything bigger is a container/scroll view whose
-                    // title/description happens to contain the query
-                    // word; clicking it doesn't do what the user asked.
-                    let maxReasonableClickableDimension: CGFloat = 800
-                    if frame.width <= maxReasonableClickableDimension,
-                       frame.height <= maxReasonableClickableDimension {
-                        let screenFrame = cgToAppKitFrame(frame)
-                        let matchedText = !attrs.title.isEmpty
-                            ? attrs.title
-                            : (!attrs.description.isEmpty ? attrs.description : attrs.value)
-                        let resolved = ResolvedElement(
-                            screenFrame: screenFrame,
-                            role: role,
-                            title: matchedText,
-                            appBundleID: appBundleID
-                        )
-                        results.append((resolved, score))
+                ), score > 0 {
+                    // Reject disabled elements — a greyed-out "Save" button
+                    // the user can't actually click is a terrible pointing
+                    // target. AXEnabled defaults to true when the attribute
+                    // is absent (most elements), so this only filters the
+                    // explicit "disabled" cases. A disabled parent still
+                    // has its descendants walked below by the recursion.
+                    let isExplicitlyDisabled = boolAttribute(node, attribute: kAXEnabledAttribute) == false
+                    if !isExplicitlyDisabled,
+                       let frame = attrs.frame,
+                       frame.width > 0, frame.height > 0 {
+                        // Reject absurd frames — a legitimate clickable
+                        // target (menu item, button, tab, checkbox) is
+                        // almost always under 800pt in either dimension.
+                        // Anything bigger is a container/scroll view whose
+                        // title/description happens to contain the query
+                        // word; clicking it doesn't do what the user asked.
+                        let maxReasonableClickableDimension: CGFloat = 800
+                        if frame.width <= maxReasonableClickableDimension,
+                           frame.height <= maxReasonableClickableDimension {
+                            let screenFrame = cgToAppKitFrame(frame)
+                            // Reject frames that don't intersect any connected
+                            // display — AX occasionally returns stale positions
+                            // for elements in hidden windows / minimized apps.
+                            let intersectsAnyScreen = NSScreen.screens.contains { $0.frame.intersects(screenFrame) }
+                            if intersectsAnyScreen {
+                                let matchedText = !attrs.title.isEmpty
+                                    ? attrs.title
+                                    : (!attrs.description.isEmpty ? attrs.description : attrs.value)
+                                let resolved = ResolvedElement(
+                                    screenFrame: screenFrame,
+                                    role: role,
+                                    title: matchedText,
+                                    appBundleID: appBundleID
+                                )
+                                results.append((resolved, score))
+                            }
+                        }
                     }
                 }
             }
@@ -425,6 +440,28 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
 
     // MARK: - Scoring
 
+    /// Roles the user commonly names explicitly. When the query contains
+    /// one of these hint words, matching AX roles get an extra boost —
+    /// "click the File menu" should prefer AXMenuBarItem/AXMenu over a
+    /// label-only AXGroup/AXStaticText that happens to say "File".
+    private static let roleHintKeywords: [String: Set<String>] = [
+        "menu": ["AXMenu", "AXMenuItem", "AXMenuBarItem", "AXMenuButton", "AXPopUpButton"],
+        "button": ["AXButton", "AXMenuButton", "AXPopUpButton"],
+        "tab": ["AXTab"],
+        "field": ["AXTextField", "AXTextArea", "AXComboBox"],
+        "input": ["AXTextField", "AXTextArea", "AXComboBox"],
+        "textbox": ["AXTextField", "AXTextArea"],
+        "checkbox": ["AXCheckBox"],
+        "radio": ["AXRadioButton"],
+        "link": ["AXLink"],
+        "slider": ["AXSlider"],
+        "cell": ["AXCell", "AXRow"],
+        "row": ["AXRow", "AXCell"],
+        "image": ["AXImage"],
+        "icon": ["AXImage", "AXButton"],
+        "toolbar": ["AXToolbar"]
+    ]
+
     /// Score an AX element against the query. Higher is better. Returns nil
     /// if the element can't match at all (non-pointable role with no text).
     ///
@@ -444,7 +481,17 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
         // Prefer pointable roles but don't hard-exclude others — some apps
         // mark buttons with unusual roles. We just boost the pointables.
         let isPointableRole = Self.pointableRoles.contains(role)
-        let roleBoost = isPointableRole ? 10 : 0
+        var roleBoost = isPointableRole ? 10 : 0
+
+        // Role-hint boost: if the query mentions "menu"/"button"/"field"
+        // etc., prefer matching AX roles over label-only matches in
+        // decorative containers (AXGroup with a static-text child).
+        for (keyword, matchingRoles) in Self.roleHintKeywords {
+            if queryNormalized.contains(keyword) && matchingRoles.contains(role) {
+                roleBoost += 8
+                break
+            }
+        }
 
         let candidateTexts = [title, description, value, help].filter { !$0.isEmpty }
         guard !candidateTexts.isEmpty else { return nil }
@@ -478,10 +525,73 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
                 let coverage = Double(overlap.count) / Double(max(queryWords.count, 1))
                 bestScore = max(bestScore, Int(coverage * 40))
             }
+
+            // Fuzzy match as a last resort — catches typos, reordered
+            // words, and near-matches that word-overlap misses (e.g.
+            // "Save Document" vs "Document Saved"). Capped below exact
+            // and substring scores so we only rely on it when nothing
+            // else worked.
+            if bestScore < 30 {
+                let similarity = Self.jaroWinklerSimilarity(textNormalized, queryNormalized)
+                if similarity >= 0.85 {
+                    bestScore = max(bestScore, Int(similarity * 35))
+                }
+            }
         }
 
         guard bestScore > 0 else { return nil }
         return bestScore + roleBoost
+    }
+
+    /// Jaro-Winkler similarity (0...1). Higher = more similar. Ideal for
+    /// short UI labels — fast, handles transpositions, and weights
+    /// matching prefixes a bit extra (so "Save" vs "Saved" scores high).
+    static func jaroWinklerSimilarity(_ s1: String, _ s2: String) -> Double {
+        let a = Array(s1)
+        let b = Array(s2)
+        if a.isEmpty && b.isEmpty { return 1.0 }
+        if a.isEmpty || b.isEmpty { return 0.0 }
+
+        let matchDistance = max(a.count, b.count) / 2 - 1
+        var aMatches = [Bool](repeating: false, count: a.count)
+        var bMatches = [Bool](repeating: false, count: b.count)
+        var matches = 0
+
+        for i in 0..<a.count {
+            let start = max(0, i - matchDistance)
+            let end = min(i + matchDistance + 1, b.count)
+            guard start < end else { continue }
+            for j in start..<end {
+                if bMatches[j] { continue }
+                if a[i] != b[j] { continue }
+                aMatches[i] = true
+                bMatches[j] = true
+                matches += 1
+                break
+            }
+        }
+
+        if matches == 0 { return 0.0 }
+
+        var transpositions = 0
+        var k = 0
+        for i in 0..<a.count where aMatches[i] {
+            while !bMatches[k] { k += 1 }
+            if a[i] != b[k] { transpositions += 1 }
+            k += 1
+        }
+
+        let m = Double(matches)
+        let jaro = (m / Double(a.count)
+                    + m / Double(b.count)
+                    + (m - Double(transpositions) / 2.0) / m) / 3.0
+
+        // Winkler prefix bonus — up to 4 leading characters, scaling factor 0.1.
+        var prefixLength = 0
+        for i in 0..<min(4, min(a.count, b.count)) {
+            if a[i] == b[i] { prefixLength += 1 } else { break }
+        }
+        return jaro + Double(prefixLength) * 0.1 * (1.0 - jaro)
     }
 
     /// Stop words we strip before comparing text — same logic as NativeElementDetector.
@@ -523,11 +633,23 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
     /// AX returns positions in "Core Graphics screen space" where (0,0) is the
     /// top-left of the primary display. AppKit uses bottom-left of the primary
     /// display. We flip Y around the primary display's height.
+    ///
+    /// CRITICAL: `NSScreen.screens.first` is NOT the primary display — on
+    /// multi-monitor setups it can be any screen. The primary is always
+    /// the screen whose AppKit origin is (0,0). Using the wrong screen's
+    /// height inverts coordinates for everything off the primary.
     private func cgToAppKitFrame(_ cgFrame: CGRect) -> CGRect {
-        guard let primaryScreen = NSScreen.screens.first else { return cgFrame }
+        let primaryScreen = NSScreen.screens.first(where: { $0.frame.origin == .zero })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        guard let primaryScreen else { return cgFrame }
         let primaryHeight = primaryScreen.frame.height
 
-        // Flip Y: AppKit Y = primaryHeight - (CG Y + height)
+        // Flip Y: AppKit Y = primaryHeight - (CG Y + height). Works for
+        // ALL displays (not just primary) because CG and AppKit share a
+        // global coordinate space — a monitor above primary has negative
+        // CG Y and AppKit Y > primaryHeight, and the subtraction is
+        // consistent.
         let appKitY = primaryHeight - cgFrame.origin.y - cgFrame.height
 
         return CGRect(
@@ -546,6 +668,17 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
             return nil
         }
         return valueRef as? String
+    }
+
+    /// Read a CFBoolean AX attribute (kAXEnabledAttribute, kAXHiddenAttribute, etc.).
+    /// Returns nil when the attribute is absent — most elements don't expose
+    /// kAXEnabled, which we interpret as "enabled by default".
+    private func boolAttribute(_ element: AXUIElement, attribute: String) -> Bool? {
+        var valueRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &valueRef) == .success else {
+            return nil
+        }
+        return valueRef as? Bool
     }
 
     // MARK: - Batch Attribute Read

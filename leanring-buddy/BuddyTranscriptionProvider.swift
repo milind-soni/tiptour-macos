@@ -1,6 +1,6 @@
 //
 //  BuddyTranscriptionProvider.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Transcription protocol surface. Gemini Live (the primary voice mode)
 //  does its own in-stream STT, so this is only exercised in the legacy

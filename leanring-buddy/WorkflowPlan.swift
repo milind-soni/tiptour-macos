@@ -1,6 +1,6 @@
 //
 //  WorkflowPlan.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Schema for AI-generated interactive tutorials. The LLM emits a
 //  structured plan (JSON) describing a multi-step workflow — we

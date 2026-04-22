@@ -1,6 +1,6 @@
 //
 //  BuddyAudioConversionSupport.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Shared audio conversion helpers for voice transcription providers.
 //

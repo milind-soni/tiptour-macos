@@ -1,6 +1,6 @@
 //
 //  GlobalPushToTalkShortcutMonitor.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Captures push-to-talk keyboard shortcuts while makesomething is running in the
 //  background. Uses a listen-only CGEvent tap so modifier-only shortcuts like
