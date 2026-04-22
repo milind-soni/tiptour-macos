@@ -838,8 +838,12 @@ final class CompanionManager: ObservableObject {
     /// pairs based on its velocity and alternating animation frames.
     /// Falls asleep after a few seconds of stillness. Purely a
     /// visual personality toggle — doesn't change any behavior.
-    /// Persisted so the user's choice survives app restarts.
-    @Published var isNekoModeEnabled: Bool = UserDefaults.standard.bool(forKey: "isNekoModeEnabled")
+    /// Defaults to ON for new installs (the cat is part of TipTour's
+    /// identity). If the user has explicitly toggled it off, that
+    /// preference is preserved across restarts.
+    @Published var isNekoModeEnabled: Bool = UserDefaults.standard.object(forKey: "isNekoModeEnabled") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "isNekoModeEnabled")
 
     func setNekoModeEnabled(_ enabled: Bool) {
         isNekoModeEnabled = enabled
@@ -1812,6 +1816,14 @@ final class CompanionManager: ObservableObject {
             NotificationCenter.default.removeObserver(observer)
             onboardingVideoEndObserver = nil
         }
+    }
+
+    /// Public entry point for the "press control + option" prompt
+    /// that used to play after the onboarding video. Called directly
+    /// from the overlay's welcome animation now that the video is
+    /// skipped — user goes welcome bubble → hotkey prompt → live app.
+    func showOnboardingHotkeyPrompt() {
+        startOnboardingPromptStream()
     }
 
     private func startOnboardingPromptStream() {

@@ -887,8 +887,11 @@ struct BlueCursorView: View {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                     self.showWelcome = false
-                    // Start the onboarding video right after the welcome text disappears
-                    self.companionManager.setupOnboardingVideo()
+                    // Skip the onboarding video entirely — go straight
+                    // from the welcome bubble to the "press ctrl+opt"
+                    // prompt so the user sees the cat cursor and can
+                    // start talking immediately.
+                    self.companionManager.showOnboardingHotkeyPrompt()
                 }
                 return
             }
