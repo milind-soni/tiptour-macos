@@ -1,6 +1,6 @@
 //
-//  ClickyAnalytics.swift
-//  leanring-buddy
+//  TipTourAnalytics.swift
+//  TipTour
 //
 //  Centralized PostHog analytics wrapper. All event names and properties
 //  are defined here so instrumentation is consistent and easy to audit.
@@ -9,7 +9,7 @@
 import Foundation
 import PostHog
 
-enum ClickyAnalytics {
+enum TipTourAnalytics {
 
     // MARK: - Setup
 
@@ -48,7 +48,7 @@ enum ClickyAnalytics {
         PostHogSDK.shared.capture("onboarding_video_completed")
     }
 
-    /// The 40s onboarding demo interaction where Clicky points at something.
+    /// The 40s onboarding demo interaction where TipTour points at something.
     static func trackOnboardingDemoTriggered() {
         PostHogSDK.shared.capture("onboarding_demo_triggered")
     }

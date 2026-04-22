@@ -1,14 +1,14 @@
 //
-//  leanring_buddyTests.swift
-//  leanring-buddyTests
+//  TipTourTests.swift
+//  TipTourTests
 //
 //  Created by thorfinn on 3/2/26.
 //
 
 import Testing
-@testable import leanring_buddy
+@testable import TipTour
 
-struct leanring_buddyTests {
+struct TipTourTests {
 
     @Test func firstPermissionRequestUsesSystemPromptOnly() async throws {
         let presentationDestination = WindowPositionManager.permissionRequestPresentationDestination(

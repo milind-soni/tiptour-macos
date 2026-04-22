@@ -1,4 +1,4 @@
-# AGENTS.md - leanring-buddy (Main App Target)
+# AGENTS.md - TipTour (Main App Target)
 
 ## Source Files
 
@@ -23,6 +23,6 @@
 - `floatingButtonWindowToExcludeFromCaptures` — `NSWindow?` reference set by ContentView
 - `captureScreen()` — Matches the floating window to an `SCWindow` and excludes it from capture filter
 
-### leanring_buddyApp.swift
+### TipTourApp.swift
 - Owns `FloatingSessionButtonManager` as `@StateObject`
 - Injects it into ContentView via `.environmentObject()`

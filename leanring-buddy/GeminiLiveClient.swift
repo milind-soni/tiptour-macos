@@ -1,6 +1,6 @@
 //
 //  GeminiLiveClient.swift
-//  leanring-buddy
+//  TipTour
 //
 //  WebSocket client for Google's Gemini Live API. Single bidirectional
 //  streaming connection that handles voice input, vision input, voice

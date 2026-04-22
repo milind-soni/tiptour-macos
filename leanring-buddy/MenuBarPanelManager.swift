@@ -1,6 +1,6 @@
 //
 //  MenuBarPanelManager.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Manages the NSStatusItem (menu bar icon) and a custom borderless NSPanel
 //  that drops down below it when clicked. The panel hosts a SwiftUI view
@@ -15,12 +15,12 @@ import AppKit
 import SwiftUI
 
 extension Notification.Name {
-    static let clickyDismissPanel = Notification.Name("clickyDismissPanel")
+    static let tipTourDismissPanel = Notification.Name("tipTourDismissPanel")
     /// Posted by CompanionManager.setPanelPinned when the user toggles
     /// the pushpin. MenuBarPanelManager reinstalls or removes the
     /// click-outside monitor based on the new pinned state, without
     /// hiding the panel.
-    static let clickyPanelPinStateChanged = Notification.Name("clickyPanelPinStateChanged")
+    static let tipTourPanelPinStateChanged = Notification.Name("tipTourPanelPinStateChanged")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -47,7 +47,7 @@ final class MenuBarPanelManager: NSObject {
         createStatusItem()
 
         dismissPanelObserver = NotificationCenter.default.addObserver(
-            forName: .clickyDismissPanel,
+            forName: .tipTourDismissPanel,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -58,7 +58,7 @@ final class MenuBarPanelManager: NSObject {
         // outside-click monitor live — no need to close and reopen the
         // panel for the change to take effect.
         pinStateChangedObserver = NotificationCenter.default.addObserver(
-            forName: .clickyPanelPinStateChanged,
+            forName: .tipTourPanelPinStateChanged,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -90,15 +90,15 @@ final class MenuBarPanelManager: NSObject {
 
         guard let button = statusItem?.button else { return }
 
-        button.image = makeClickyMenuBarIcon()
+        button.image = makeMenuBarIcon()
         button.image?.isTemplate = true
         button.action = #selector(statusItemClicked)
         button.target = self
     }
 
-    /// Draws the clicky triangle as a menu bar icon. Uses the same shape
+    /// Draws the TipTour triangle as a menu bar icon. Uses the same shape
     /// and rotation as the in-app cursor so the menu bar icon matches.
-    private func makeClickyMenuBarIcon() -> NSImage {
+    private func makeMenuBarIcon() -> NSImage {
         let iconSize: CGFloat = 18
         let image = NSImage(size: NSSize(width: iconSize, height: iconSize))
         image.lockFocus()

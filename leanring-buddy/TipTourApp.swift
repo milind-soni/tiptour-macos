@@ -1,6 +1,6 @@
 //
-//  leanring_buddyApp.swift
-//  leanring-buddy
+//  TipTourApp.swift
+//  TipTour
 //
 //  Menu bar-only companion app. No dock icon, no main window — just an
 //  always-available status item in the macOS menu bar. Clicking the icon
@@ -12,7 +12,7 @@ import SwiftUI
 import Sparkle
 
 @main
-struct leanring_buddyApp: App {
+struct TipTourApp: App {
     @NSApplicationDelegateAdaptor(CompanionAppDelegate.self) var appDelegate
 
     var body: some Scene {
@@ -34,13 +34,13 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("🎯 Clicky: Starting...")
-        print("🎯 Clicky: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
+        print("🎯 TipTour: Starting...")
+        print("🎯 TipTour: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
 
-        ClickyAnalytics.configure()
-        ClickyAnalytics.trackAppOpened()
+        TipTourAnalytics.configure()
+        TipTourAnalytics.trackAppOpened()
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
@@ -65,9 +65,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         if loginItemService.status != .enabled {
             do {
                 try loginItemService.register()
-                print("🎯 Clicky: Registered as login item")
+                print("🎯 TipTour: Registered as login item")
             } catch {
-                print("⚠️ Clicky: Failed to register as login item: \(error)")
+                print("⚠️ TipTour: Failed to register as login item: \(error)")
             }
         }
     }
@@ -83,7 +83,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         do {
             try updaterController.updater.start()
         } catch {
-            print("⚠️ Clicky: Sparkle updater failed to start: \(error)")
+            print("⚠️ TipTour: Sparkle updater failed to start: \(error)")
         }
     }
 }

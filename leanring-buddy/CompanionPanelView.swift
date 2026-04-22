@@ -1,6 +1,6 @@
 //
 //  CompanionPanelView.swift
-//  leanring-buddy
+//  TipTour
 //
 //  The SwiftUI content hosted inside the menu bar panel. Shows the companion
 //  voice status, push-to-talk shortcut, and quick settings. Designed to feel
@@ -127,7 +127,7 @@ struct CompanionPanelView: View {
             pinToggleButton
 
             Button(action: {
-                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
@@ -660,8 +660,8 @@ struct CompanionPanelView: View {
             Spacer()
 
             Toggle("", isOn: Binding(
-                get: { companionManager.isClickyCursorEnabled },
-                set: { companionManager.setClickyCursorEnabled($0) }
+                get: { companionManager.isTipTourCursorEnabled },
+                set: { companionManager.setTipTourCursorEnabled($0) }
             ))
             .toggleStyle(.switch)
             .labelsHidden()
@@ -1193,7 +1193,7 @@ struct CompanionPanelView: View {
                 } else {
                     NativeElementDetector.shared.stopLiveFeeding()
                 }
-                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             } trailing: {
                 Text(companionManager.showDetectionOverlay ? "On" : "Off")
                     .foregroundColor(companionManager.showDetectionOverlay ? DS.Colors.textSecondary : DS.Colors.textTertiary)
@@ -1204,12 +1204,12 @@ struct CompanionPanelView: View {
                 companionManager.detectedElementScreenLocation = CGPoint(x: s.frame.midX, y: s.frame.midY)
                 companionManager.detectedElementDisplayFrame = s.frame
                 companionManager.detectedElementBubbleText = "Test"
-                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             }
 
             devToolRow("Start Demo Tutorial", systemImage: "play") {
                 companionManager.startDemoTutorial()
-                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             }
 
             devToolRow("Advance Step", systemImage: "forward") {
@@ -1223,7 +1223,7 @@ struct CompanionPanelView: View {
                 companionManager.onboardingPromptText = "Press G"
                 companionManager.onboardingPromptOpacity = 1.0
                 companionManager.showOnboardingPrompt = true
-                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             }
 
             devToolRow("Test Scroll Overlay", systemImage: "arrow.up.arrow.down") {
@@ -1232,7 +1232,7 @@ struct CompanionPanelView: View {
                 companionManager.onboardingPromptText = "Scroll"
                 companionManager.onboardingPromptOpacity = 1.0
                 companionManager.showOnboardingPrompt = true
-                NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             }
 
             devToolRow("Toggle Mute Video", systemImage: "speaker.slash") {

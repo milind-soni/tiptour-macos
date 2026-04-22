@@ -1,6 +1,6 @@
 //
 //  AccessibilityTreeResolver.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Walks the macOS Accessibility (AX) tree of the frontmost app and looks
 //  up UI elements by title. Returns pixel-perfect frames from the app's
@@ -135,10 +135,10 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
     }
 
     /// The bundle ID of our own app — we NEVER query our own AX tree
-    /// because opening the menu bar panel makes Clicky briefly frontmost
+    /// because opening the menu bar panel makes TipTour briefly frontmost
     /// and the panel's tree has nothing to do with what the user is
     /// actually looking at. Skipping ourselves forces the resolver to
-    /// use the LAST foreground app before Clicky took focus.
+    /// use the LAST foreground app before TipTour took focus.
     private static var ownBundleID: String? {
         Bundle.main.bundleIdentifier
     }
@@ -146,7 +146,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
     /// Snapshot of the user's real frontmost app at the moment the hotkey
     /// was pressed. Set by CompanionManager.handleShortcutTransition at
     /// press time — before any of our UI shows — so we always know
-    /// which app the user was actually looking at, even after Clicky's
+    /// which app the user was actually looking at, even after TipTour's
     /// menu bar panel takes focus.
     nonisolated(unsafe) static var userTargetAppOverride: NSRunningApplication?
 
@@ -201,7 +201,7 @@ final class AccessibilityTreeResolver: @unchecked Sendable {
     ///      skipping our own app.
     ///   3. NSWorkspace.frontmostApplication (skipping our own).
     ///   4. Most recently active running app that isn't us — covers the
-    ///      case where pressing the hotkey momentarily made Clicky
+    ///      case where pressing the hotkey momentarily made TipTour
     ///      frontmost.
     private func resolveTargetApp(hint: String?) -> (AXUIElement?, String?) {
         if let hint, !hint.isEmpty, hint.lowercased() != "unknown" {

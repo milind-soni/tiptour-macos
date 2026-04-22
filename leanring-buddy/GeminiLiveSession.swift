@@ -1,6 +1,6 @@
 //
 //  GeminiLiveSession.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Orchestrates a full Gemini Live conversation session:
 //    1. Opens a WebSocket to Gemini via GeminiLiveClient

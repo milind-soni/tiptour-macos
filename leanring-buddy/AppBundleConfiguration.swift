@@ -1,6 +1,6 @@
 //
 //  AppBundleConfiguration.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Shared helper for reading runtime configuration from the built app bundle.
 //

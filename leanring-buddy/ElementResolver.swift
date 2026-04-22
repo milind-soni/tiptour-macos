@@ -1,6 +1,6 @@
 //
 //  ElementResolver.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Single entry point for "where on screen should the cursor fly to?"
 //

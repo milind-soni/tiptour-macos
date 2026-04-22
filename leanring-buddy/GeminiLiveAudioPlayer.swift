@@ -1,6 +1,6 @@
 //
 //  GeminiLiveAudioPlayer.swift
-//  leanring-buddy
+//  TipTour
 //
 //  Streams PCM16 audio chunks from Gemini Live to the speakers in real time.
 //  Uses AVAudioEngine with a scheduled buffer queue so chunks play back
