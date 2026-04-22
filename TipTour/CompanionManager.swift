@@ -956,6 +956,7 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        beginTrackingUserTargetApp()
         // Push the persisted debug flag into ClickDetector — the
         // @Published didSet only fires on assignment, so the initial
         // load from UserDefaults needs to be copied across manually.
@@ -1232,6 +1233,46 @@ final class CompanionManager: ObservableObject {
             .sink { [weak self] transition in
                 self?.handleShortcutTransition(transition)
             }
+    }
+
+    /// Watch NSWorkspace for app-activation events and continuously
+    /// remember the last NON-TipTour app the user activated. This is
+    /// the `userTargetAppOverride` the AX resolver uses to route
+    /// queries at the right app.
+    ///
+    /// Why this exists: capturing the frontmost app only at hotkey
+    /// press time breaks if the user has interacted with TipTour's
+    /// menu bar panel first (e.g. pasted an API key in the Developer
+    /// section) — at hotkey press, frontmost is TipTour, we skip
+    /// updating the override, and the AX resolver falls back to
+    /// "most recent launched app" which may be completely unrelated
+    /// to whatever the user actually had focused.
+    ///
+    /// With this observer, every time the user activates Xcode /
+    /// Blender / Chrome / whatever, we update the override. By the
+    /// time they press Ctrl+Option, the override is already correct.
+    private func beginTrackingUserTargetApp() {
+        // Seed with current frontmost (handles the case where the app
+        // launches while the user is already focused in e.g. Xcode).
+        if let current = NSWorkspace.shared.frontmostApplication,
+           current.bundleIdentifier != Bundle.main.bundleIdentifier {
+            AccessibilityTreeResolver.userTargetAppOverride = current
+        }
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+                return
+            }
+            // Skip our own activations (menu bar panel, text field focus,
+            // etc.) — we only care about apps the user might want TipTour
+            // to point into.
+            guard app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+            AccessibilityTreeResolver.userTargetAppOverride = app
+        }
     }
 
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
