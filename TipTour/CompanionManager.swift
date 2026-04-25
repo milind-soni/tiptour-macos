@@ -686,6 +686,26 @@ final class CompanionManager: ObservableObject {
             return ["ok": true, "duplicate": true]
         }
         handledToolCallIDsThisUtterance.insert(id)
+
+        // Re-entry guard: Gemini occasionally re-emits submit_workflow_plan
+        // when it sees a fresh screenshot showing the SAME unfulfilled state
+        // (e.g. cursor still highlighting the first step's element because
+        // the user hasn't clicked yet). Without this guard the runner gets
+        // restarted from step 1 on every screenshot, the click detector is
+        // re-armed, narration mode toggles on/off rapidly (causing the
+        // -10877 CoreAudio errors), and the user is stuck in a loop.
+        // If a plan is already running, tell Gemini to wait — don't accept
+        // another one until the user explicitly cancels or completes the
+        // current one.
+        if let activePlan = WorkflowRunner.shared.activePlan {
+            print("[Tool] ⏭️  rejecting submit_workflow_plan — plan \"\(activePlan.goal)\" already running (step \(WorkflowRunner.shared.activeStepIndex + 1)/\(activePlan.steps.count))")
+            return [
+                "ok": false,
+                "reason": "plan_already_running",
+                "message": "A plan is already executing on the user's machine. Wait for the user to act or to cancel before submitting another plan. Do not re-submit this plan."
+            ]
+        }
+
         print("[Tool] 🔧 submit_workflow_plan(goal=\"\(goal)\", app=\"\(app)\", \(steps.count) steps)")
         planAppliedThisTurn = true
 
@@ -1432,6 +1452,9 @@ final class CompanionManager: ObservableObject {
     - single visible element → point_at_element.
     - anything needing a sequence → submit_workflow_plan.
     - no UI involvement (pure knowledge or chit-chat) → no tool, just speak.
+
+    PLAN-IN-PROGRESS RULE:
+    after submit_workflow_plan returns ok, the on-device runner takes over and walks the user through the steps. you will continue receiving screenshots that may show the SAME unfulfilled state (cursor still pointing at step 1 because the user hasn't clicked yet — the user reads at human speed). this is NORMAL and EXPECTED. do NOT submit another plan. do NOT call any tool. stay silent and wait. only act again when the user speaks a NEW request. if the toolResponse comes back with reason "plan_already_running", you have hallucinated a re-submit — stop, say nothing, wait for the user.
 
     PRE-TOOL-CALL SILENCE:
     if your next action is a tool call, stay completely silent — no filler, no "sure", no "hmm". call the tool, wait for toolResponse, THEN speak. if you speak before the tool call, the user hears a half-word that cuts off when the tool fires.

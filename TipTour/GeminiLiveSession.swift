@@ -393,7 +393,22 @@ final class GeminiLiveSession: ObservableObject {
             return
         }
 
+        // Always update the local cache so cursor coordinate mapping
+        // and YOLO cache stay fresh — these are local consumers, not
+        // network sends.
         latestCapture = primaryCapture
+
+        // While the on-device WorkflowRunner is executing a plan, do
+        // NOT push fresh screenshots to Gemini. Gemini misinterprets
+        // unchanged "user hasn't clicked the highlighted element yet"
+        // frames as "user still needs help" and submits another plan,
+        // which the re-entry guard now rejects but still wastes a turn.
+        // Suppressing the upload removes the trigger entirely so Gemini
+        // sits quiet until either the workflow completes (runner clears
+        // activePlan) or the user speaks (mic stays live for that).
+        if await MainActor.run(body: { WorkflowRunner.shared.activePlan != nil }) {
+            return
+        }
 
         let screenLabel = primaryCapture.label
         let newHash = ScreenshotPerceptualHash.perceptualHash(forJPEGData: primaryCapture.imageData)
