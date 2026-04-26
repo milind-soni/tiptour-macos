@@ -15,7 +15,7 @@ enum TipTourAnalytics {
 
     static func configure() {
         let config = PostHogConfig(
-            apiKey: "phc_xcQPygmhTMzzYh8wNW92CCwoXmnzqyChAixh8zgpqC3C",
+            apiKey: "phc_eyoeIEaFImDiBTiTFjnX52WfMYRaJSol7W2uQi7slID",
             host: "https://us.i.posthog.com"
         )
         PostHogSDK.shared.setup(config)
