@@ -247,21 +247,28 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Onboarding video — always in the view tree so opacity animation works
-            // reliably. When no player exists or opacity is 0, nothing is visible.
-            // allowsHitTesting(false) prevents it from intercepting clicks.
-            OnboardingVideoPlayerView(player: companionManager.onboardingVideoPlayer)
-                .frame(width: onboardingVideoPlayerWidth, height: onboardingVideoPlayerHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .shadow(color: Color.black.opacity(0.4 * companionManager.onboardingVideoOpacity), radius: 12, x: 0, y: 6)
-                .opacity(isCursorOnThisScreen ? companionManager.onboardingVideoOpacity : 0)
-                .position(
-                    x: cursorPosition.x + bubbleLeftOffsetFromCursor + (onboardingVideoPlayerWidth / 2),
-                    y: cursorPosition.y + bubbleTopOffsetFromCursor + (onboardingVideoPlayerHeight / 2)
-                )
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeInOut(duration: 2.0), value: companionManager.onboardingVideoOpacity)
-                .allowsHitTesting(false)
+            // Tutorial video chip — only rendered in cursor-following
+            // mode (PiP mode uses TutorialVideoPanelManager's floating
+            // panel and leaves this branch unrendered). The embed is
+            // a WKWebView so we DO want hit-testing on it (so YouTube
+            // controls work) — that's why this branch is gated by
+            // `showOnboardingVideo`. Without an active controller +
+            // video ID, nothing renders.
+            if companionManager.showOnboardingVideo,
+               let embedController = companionManager.tutorialEmbedController,
+               let videoID = companionManager.activeTutorialVideoID {
+                YouTubeEmbedView(videoID: videoID, controller: embedController)
+                    .frame(width: onboardingVideoPlayerWidth, height: onboardingVideoPlayerHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .shadow(color: Color.black.opacity(0.4 * companionManager.onboardingVideoOpacity), radius: 12, x: 0, y: 6)
+                    .opacity(isCursorOnThisScreen ? companionManager.onboardingVideoOpacity : 0)
+                    .position(
+                        x: cursorPosition.x + bubbleLeftOffsetFromCursor + (onboardingVideoPlayerWidth / 2),
+                        y: cursorPosition.y + bubbleTopOffsetFromCursor + (onboardingVideoPlayerHeight / 2)
+                    )
+                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                    .animation(.easeInOut(duration: 2.0), value: companionManager.onboardingVideoOpacity)
+            }
 
             // Onboarding prompt — "press control + option and say hi" streamed after video ends
             if isCursorOnThisScreen && companionManager.showOnboardingPrompt && !companionManager.onboardingPromptText.isEmpty {
@@ -1089,46 +1096,6 @@ class OverlayWindowManager {
     }
 }
 
-// MARK: - Onboarding Video Player
-
-/// NSViewRepresentable wrapping an AVPlayerLayer so HLS video plays
-/// inside SwiftUI. Uses a custom NSView subclass to keep the player
-/// layer sized to the view's bounds automatically.
-private struct OnboardingVideoPlayerView: NSViewRepresentable {
-    let player: AVPlayer?
-
-    func makeNSView(context: Context) -> AVPlayerNSView {
-        let view = AVPlayerNSView()
-        view.player = player
-        return view
-    }
-
-    func updateNSView(_ nsView: AVPlayerNSView, context: Context) {
-        nsView.player = player
-    }
-}
-
-private class AVPlayerNSView: NSView {
-    var player: AVPlayer? {
-        didSet { playerLayer.player = player }
-    }
-
-    private let playerLayer = AVPlayerLayer()
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        playerLayer.videoGravity = .resizeAspectFill
-        layer?.addSublayer(playerLayer)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        playerLayer.frame = bounds
-    }
-}
 
 // MARK: - Scroll Pill Overlay
 

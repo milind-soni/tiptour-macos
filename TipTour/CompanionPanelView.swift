@@ -1210,7 +1210,62 @@ struct CompanionPanelView: View {
                     .font(.system(size: 10))
                     .foregroundColor(tutorialStatus.contains("Error") ? .red.opacity(0.7) : DS.Colors.textTertiary)
             }
+
+            tutorialVideoModeToggleRow
         }
+    }
+
+    /// Lets the user pick where the tutorial's YouTube video plays:
+    /// in a corner PiP panel (default, classic) or in a chip that
+    /// follows the cursor (matches the original Clicky-era pattern).
+    private var tutorialVideoModeToggleRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "rectangle.on.rectangle")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+
+            Text("Video plays")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+
+            Spacer()
+
+            HStack(spacing: 0) {
+                tutorialVideoModeOptionButton(label: "PiP", mode: .pip)
+                tutorialVideoModeOptionButton(label: "Cursor", mode: .cursorFollowing)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+        }
+        .padding(.top, 4)
+    }
+
+    private func tutorialVideoModeOptionButton(
+        label: String,
+        mode: CompanionManager.TutorialVideoMode
+    ) -> some View {
+        let isSelected = companionManager.tutorialVideoMode == mode
+        return Button(action: {
+            companionManager.setTutorialVideoMode(mode)
+        }) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(isSelected ? .white : DS.Colors.textTertiary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(isSelected ? DS.Colors.accent : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
     }
 
     private func startTutorial() {
@@ -1231,7 +1286,7 @@ struct CompanionPanelView: View {
                 await MainActor.run {
                     tutorialStatus = "Ready! \(result.guide.steps.count) steps extracted"
                     isTutorialLoading = false
-                    companionManager.startTutorial(guide: result.guide, videoPath: result.videoPath)
+                    companionManager.startTutorial(guide: result.guide, videoID: result.videoID)
                 }
             } catch {
                 await MainActor.run {

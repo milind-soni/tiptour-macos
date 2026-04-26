@@ -47,9 +47,6 @@ final class CompanionManager: ObservableObject {
     @Published var activeTutorial: TutorialGuide?
     @Published var tutorialStepIndex: Int = 0
     @Published var isTutorialActive: Bool = false
-    @Published var tutorialVideoPlayer: AVPlayer?
-    @Published var showTutorialVideo: Bool = false
-    @Published var tutorialVideoOpacity: Double = 0.0
     /// Current tutorial action type for animation rendering (keyboard, scroll, click, etc.)
     @Published var tutorialActionType: String = ""
     /// Show YOLO detection boxes overlay — toggle from dev tools
@@ -62,48 +59,118 @@ final class CompanionManager: ObservableObject {
     @Published var highlightedElementLabel: String? = nil
     /// Key label to display for keyboard actions (e.g. "G", "Ctrl+Z")
     @Published var tutorialKeyLabel: String = ""
-    private var tutorialTimeObserver: Any?
     private var tutorialSkipObserverUntil: Date = .distantPast
 
-    /// Start an interactive tutorial from a generated guide
-    func startTutorial(guide: TutorialGuide, videoPath: String? = nil) {
+    /// Where the tutorial's YouTube video should play.
+    /// `pip` = floating draggable PiP panel in a screen corner (default).
+    /// `cursorFollowing` = small chip that floats next to the cursor,
+    /// matching the original Clicky-era pattern.
+    enum TutorialVideoMode: String {
+        case pip
+        case cursorFollowing
+    }
+
+    /// User preference for where tutorial videos render. Persisted in
+    /// UserDefaults so the user's choice survives app restarts.
+    @Published var tutorialVideoMode: TutorialVideoMode = TutorialVideoMode(
+        rawValue: UserDefaults.standard.string(forKey: "tutorialVideoMode") ?? ""
+    ) ?? .pip
+
+    func setTutorialVideoMode(_ mode: TutorialVideoMode) {
+        tutorialVideoMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "tutorialVideoMode")
+        // If a tutorial is currently running, hot-swap the video surface
+        // so the toggle takes effect immediately instead of next launch.
+        if isTutorialActive, let videoID = activeTutorialVideoID {
+            applyVideoSurfaceForCurrentMode(videoID: videoID)
+        }
+    }
+
+    /// Shared YouTube IFrame controller used by both the PiP panel and
+    /// the cursor-following overlay chip. Created on tutorial start,
+    /// torn down on stop.
+    @Published private(set) var tutorialEmbedController: YouTubeEmbedController?
+
+    /// The video ID currently loaded in the embed. Cached so toggling
+    /// between PiP and cursor-following modes mid-tutorial keeps the
+    /// same video.
+    @Published private(set) var activeTutorialVideoID: String?
+
+    /// Polling timer that watches the YouTube IFrame's currentTime so
+    /// CompanionManager can advance to the next step when the video
+    /// crosses the upcoming step's timestamp.
+    private var tutorialEmbedTimePoller: Timer?
+
+    /// Start an interactive tutorial from a generated guide.
+    /// `videoID` is the YouTube ID; the video plays inside an embedded
+    /// YouTube player so we never download anything.
+    func startTutorial(guide: TutorialGuide, videoID: String?) {
         activeTutorial = guide
         tutorialStepIndex = 0
         isTutorialActive = true
 
         print("[Tutorial] Starting: \(guide.title) (\(guide.steps.count) steps)")
 
-        // Play the local video file if available
-        let videoURL: URL?
-        if let path = videoPath {
-            videoURL = URL(fileURLWithPath: path)
-            print("[Tutorial] Playing local video: \(path)")
+        // Resolve the video ID — prefer the one passed in, otherwise
+        // try to extract it from the guide's videoURL field.
+        let resolvedVideoID = videoID ?? Self.extractYouTubeID(from: guide.videoURL)
+        activeTutorialVideoID = resolvedVideoID
+
+        if let resolvedVideoID = resolvedVideoID {
+            // Build the shared controller and surface the video in the
+            // user's preferred mode (PiP panel or cursor-following chip).
+            let controller = YouTubeEmbedController()
+            tutorialEmbedController = controller
+            applyVideoSurfaceForCurrentMode(videoID: resolvedVideoID)
+            startTutorialEmbedTimePolling(controller: controller)
         } else {
-            videoURL = nil
-            print("[Tutorial] No video file — steps only")
-        }
-
-        if let videoURL = videoURL {
-            let player = AVPlayer(url: videoURL)
-            player.isMuted = false
-            player.volume = 1.0
-            self.onboardingVideoPlayer = player
-            self.showOnboardingVideo = true
-
-            withAnimation(.easeIn(duration: 0.5)) {
-                self.onboardingVideoOpacity = 1.0
-            }
-
-            player.play()
-            print("[Tutorial] Video playing")
-
-            setupTutorialTimeObserver(player: player)
+            print("[Tutorial] No video ID — steps only")
         }
 
         // Show first step hint on the cursor
         if let firstStep = guide.steps.first {
             showTutorialStep(firstStep)
         }
+    }
+
+    /// Mount the YouTube embed in either the PiP panel or the cursor-
+    /// following overlay chip, depending on `tutorialVideoMode`. Safe
+    /// to call repeatedly — switches surfaces cleanly when the user
+    /// toggles the mode mid-tutorial.
+    private func applyVideoSurfaceForCurrentMode(videoID: String) {
+        guard let controller = tutorialEmbedController else { return }
+        switch tutorialVideoMode {
+        case .pip:
+            // Hide cursor-following chip, show PiP panel.
+            showOnboardingVideo = false
+            onboardingVideoOpacity = 0.0
+            TutorialVideoPanelManager.shared.show(videoID: videoID, controller: controller)
+        case .cursorFollowing:
+            // Hide PiP panel, show cursor-following chip in the
+            // OverlayWindow (it watches `showOnboardingVideo`).
+            TutorialVideoPanelManager.shared.hide()
+            showOnboardingVideo = true
+            withAnimation(.easeIn(duration: 0.4)) {
+                onboardingVideoOpacity = 1.0
+            }
+        }
+    }
+
+    /// Pull the YouTube video ID out of a full watch / share URL.
+    /// Mirrors the parser in TutorialGuideGenerator so we don't depend
+    /// on an internal helper there.
+    private static func extractYouTubeID(from url: String) -> String? {
+        guard let components = URLComponents(string: url) else { return nil }
+        if let v = components.queryItems?.first(where: { $0.name == "v" })?.value {
+            return v
+        }
+        if components.host == "youtu.be" {
+            return String(components.path.dropFirst())
+        }
+        if components.path.contains("/embed/") {
+            return components.path.components(separatedBy: "/embed/").last
+        }
+        return nil
     }
 
     /// Advance to next tutorial step — called by hotkey or auto-detection
@@ -121,10 +188,11 @@ final class CompanionManager: ObservableObject {
         let step = guide.steps[tutorialStepIndex]
         print("[Tutorial] Step \(tutorialStepIndex + 1)/\(guide.steps.count): \(step.hint)")
 
-        // Seek video to this step's timestamp — video keeps playing
-        let seekTime = CMTime(seconds: step.timestamp, preferredTimescale: 600)
-        onboardingVideoPlayer?.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
-        onboardingVideoPlayer?.play()
+        // Seek the YouTube embed to this step's timestamp and resume
+        // playback. The IFrame controller's bridge handles seek+play
+        // even if a previous seek is still in-flight.
+        tutorialEmbedController?.seek(toSeconds: step.timestamp)
+        tutorialEmbedController?.play()
 
         showTutorialStep(step)
     }
@@ -157,22 +225,9 @@ final class CompanionManager: ObservableObject {
 
         let guide = TutorialGuide(title: title, app: app, steps: steps, videoURL: "https://www.youtube.com/watch?v=peSv5IT5Ve4")
 
-        // Download video if not cached
-        let videoID = "peSv5IT5Ve4"
-        let videoPath = NSTemporaryDirectory() + "tiptour-\(videoID).mp4"
-
-        if FileManager.default.fileExists(atPath: videoPath) {
-            startTutorial(guide: guide, videoPath: videoPath)
-        } else {
-            // Download in background, start without video for now
-            startTutorial(guide: guide, videoPath: nil)
-            Task {
-                if let downloadedPath = try? await TutorialGuideGenerator.downloadVideoPublic(videoID: videoID) {
-                    print("[Demo] Video downloaded: \(downloadedPath)")
-                }
-            }
-        }
-
+        // No download required — video plays inside the embedded
+        // YouTube IFrame Player on the user's machine.
+        startTutorial(guide: guide, videoID: "peSv5IT5Ve4")
         print("[Demo] Loaded \(steps.count) steps")
     }
 
@@ -180,19 +235,22 @@ final class CompanionManager: ObservableObject {
         isTutorialActive = false
         activeTutorial = nil
         tutorialStepIndex = 0
+        activeTutorialVideoID = nil
 
-        if let observer = tutorialTimeObserver {
-            onboardingVideoPlayer?.removeTimeObserver(observer)
-            tutorialTimeObserver = nil
-        }
-        onboardingVideoPlayer?.pause()
+        // Stop the YouTube embed time poller and tear down the
+        // embed controller so the WKWebView can deallocate.
+        tutorialEmbedTimePoller?.invalidate()
+        tutorialEmbedTimePoller = nil
+        tutorialEmbedController?.pause()
+        tutorialEmbedController = nil
 
+        // Hide both possible video surfaces.
+        TutorialVideoPanelManager.shared.hide()
         withAnimation(.easeOut(duration: 0.3)) {
             onboardingVideoOpacity = 0.0
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            self.onboardingVideoPlayer = nil
             self.showOnboardingVideo = false
         }
 
@@ -446,24 +504,26 @@ final class CompanionManager: ObservableObject {
         detectedElementBubbleText = resolution.label
     }
 
-    private func setupTutorialTimeObserver(player: AVPlayer) {
-        // Check time every 0.5s to pause at step timestamps
-        let interval = CMTime(seconds: 0.5, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        tutorialTimeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self = self, self.isTutorialActive, let guide = self.activeTutorial else { return }
+    /// Drive step advancement off the YouTube IFrame's currentTime.
+    /// AVPlayer had a real periodic-time observer; the IFrame doesn't,
+    /// so we poll `controller.currentTimeSeconds()` every 0.5s. Cheap
+    /// — it's a single JS evaluateJavaScript call, no IO.
+    private func startTutorialEmbedTimePolling(controller: YouTubeEmbedController) {
+        tutorialEmbedTimePoller?.invalidate()
+        tutorialEmbedTimePoller = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self, weak controller] _ in
+            guard let self = self, let controller = controller else { return }
+            Task { @MainActor in
+                guard self.isTutorialActive, let guide = self.activeTutorial else { return }
+                let currentSeconds = await controller.currentTimeSeconds()
+                let nextStepIndex = self.tutorialStepIndex + 1
+                guard nextStepIndex < guide.steps.count else { return }
 
-            let currentSeconds = CMTimeGetSeconds(time)
-            let currentStep = self.tutorialStepIndex
-
-            // Look ahead: if the NEXT step's timestamp has been reached, pause
-            // and show the CURRENT step (what user needs to do now)
-            let nextStepIndex = currentStep + 1
-            if nextStepIndex < guide.steps.count {
                 let nextTimestamp = guide.steps[nextStepIndex].timestamp
+                // Pause and surface the upcoming step half a second
+                // before its timestamp — gives the user a beat to read
+                // the hint before the video continues.
                 if currentSeconds >= nextTimestamp - 0.5 {
-                    // Pause slightly before the next step starts
-                    player.pause()
-                    // Show the NEXT step — this is what the user needs to do
+                    controller.pause()
                     self.tutorialStepIndex = nextStepIndex
                     let step = guide.steps[nextStepIndex]
                     self.showTutorialStep(step)
@@ -476,11 +536,11 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
-    // Kept under "onboardingVideoPlayer" name for now because the tutorial
-    // flow reuses this property to render tutorial videos through the
-    // same SwiftUI view. TODO: rename to `tutorialVideoPlayer` in a
-    // dedicated cleanup pass.
-    @Published var onboardingVideoPlayer: AVPlayer?
+    // The tutorial overlay's cursor-following chip watches this flag.
+    // When true AND `tutorialEmbedController` is non-nil AND
+    // `activeTutorialVideoID` is set, OverlayWindow renders a
+    // YouTubeEmbedView next to the cursor. The original AVPlayer-
+    // backed onboarding video is gone — only YouTube embeds now.
     @Published var showOnboardingVideo: Bool = false
     @Published var onboardingVideoOpacity: Double = 0.0
 

@@ -36,75 +36,31 @@ class TutorialGuideGenerator {
     /// Worker proxy URL — matches CompanionManager.workerBaseURL
     private static let workerBaseURL = "http://localhost:8787"
 
-    /// Generate a guide from a YouTube URL. Returns guide + local video path.
+    /// Generate a tutorial guide from a YouTube URL.
+    ///
+    /// We no longer download the video — it plays inside an embedded
+    /// YouTube IFrame Player on the user's machine, so this function
+    /// only needs to extract the video ID, fetch the transcript, and
+    /// run AI analysis. yt-dlp is no longer a runtime dependency.
     static func generate(
         youtubeURL: String,
         onStatus: @escaping (String) -> Void
-    ) async throws -> (guide: TutorialGuide, videoPath: String?) {
+    ) async throws -> (guide: TutorialGuide, videoID: String) {
 
-        // 1. Extract video ID
         guard let videoID = extractVideoID(from: youtubeURL) else {
             throw GuideError.invalidURL
         }
 
-        // 2. Download video with yt-dlp
-        onStatus("Downloading video...")
-        let videoPath = try? await downloadVideo(videoID: videoID)
-        if let path = videoPath {
-            print("[GuideGen] Video downloaded: \(path)")
-        }
-
-        // 3. Fetch transcript
         onStatus("Fetching transcript...")
         let transcript = try await fetchTranscript(videoID: videoID)
         onStatus("Got transcript (\(transcript.count) chars)")
 
-        // 4. Send to Gemini
         print("[GuideGen] Transcript (\(transcript.count) chars):\n\(transcript.prefix(500))")
         onStatus("Analyzing with AI...")
         let guide = try await analyzeWithGemini(transcript: transcript, videoURL: youtubeURL)
         onStatus("Done — \(guide.steps.count) steps extracted")
 
-        return (guide, videoPath)
-    }
-
-    /// Download YouTube video to a temp file using yt-dlp
-    static func downloadVideoPublic(videoID: String) async throws -> String {
-        return try await downloadVideo(videoID: videoID)
-    }
-
-    private static func downloadVideo(videoID: String) async throws -> String {
-        let outputPath = NSTemporaryDirectory() + "tiptour-\(videoID).mp4"
-
-        // Skip if already downloaded
-        if FileManager.default.fileExists(atPath: outputPath) {
-            print("[GuideGen] Video already cached")
-            return outputPath
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/yt-dlp")
-        process.arguments = [
-            "-f", "worst[ext=mp4]",  // smallest for speed
-            "--max-filesize", "100M",
-            "-o", outputPath,
-            "https://www.youtube.com/watch?v=\(videoID)"
-        ]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        try process.run()
-        process.waitUntilExit()
-
-        if process.terminationStatus != 0 {
-            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            print("[GuideGen] yt-dlp error: \(output.prefix(200))")
-            throw GuideError.transcriptFailed("Video download failed")
-        }
-
-        return outputPath
+        return (guide, videoID)
     }
 
     // MARK: - Video ID
