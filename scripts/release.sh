@@ -51,7 +51,12 @@ DMG_BACKGROUND="${PROJECT_DIR}/dmg-background.png"
 GITHUB_REPO="milind-soni/tiptour-releases"
 
 # Sparkle tools (auto-discovered from Xcode's SPM cache)
-SPARKLE_BIN=$(find ~/Library/Developer/Xcode/DerivedData/TipTour*/SourcePackages/artifacts/sparkle/Sparkle/bin -maxdepth 0 2>/dev/null | head -1)
+# Xcode names DerivedData folders after the .xcodeproj filename
+# (lowercased + munged), not the scheme — so this glob must match
+# "tiptour-macos-*", not "TipTour*". Earliest folder wins; if you have
+# multiple matching DerivedData dirs (which you shouldn't normally),
+# pick the most recent.
+SPARKLE_BIN=$(find ~/Library/Developer/Xcode/DerivedData/tiptour-macos-*/SourcePackages/artifacts/sparkle/Sparkle/bin -maxdepth 0 2>/dev/null | head -1)
 
 if [ -z "$SPARKLE_BIN" ]; then
     echo "❌ Sparkle tools not found. Build the project in Xcode first so SPM downloads Sparkle."

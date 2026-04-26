@@ -426,7 +426,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "TipTour needs screen recording access to see your screen and help you.";
 				INFOPLIST_KEY_SUFeedURL = "https://github.com/milind-soni/tiptour-releases/raw/main/appcast.xml";
-				INFOPLIST_KEY_SUPublicEDKey = "REPLACE_WITH_SPARKLE_PUBLIC_KEY_FROM_generate_keys";
+				INFOPLIST_KEY_SUPublicEDKey = "KNj1qMm+aKDZsv53kbgiy9Kn5aQfuGuU4EcKb+54szw=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -468,7 +468,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "TipTour needs screen recording access to see your screen and help you.";
 				INFOPLIST_KEY_SUFeedURL = "https://github.com/milind-soni/tiptour-releases/raw/main/appcast.xml";
-				INFOPLIST_KEY_SUPublicEDKey = "REPLACE_WITH_SPARKLE_PUBLIC_KEY_FROM_generate_keys";
+				INFOPLIST_KEY_SUPublicEDKey = "KNj1qMm+aKDZsv53kbgiy9Kn5aQfuGuU4EcKb+54szw=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
