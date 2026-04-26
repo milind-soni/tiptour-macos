@@ -500,7 +500,14 @@ final class CompanionManager: ObservableObject {
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
     /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "http://localhost:8787"
+    private static let workerBaseURL: String = {
+        let url = "http://localhost:8787"
+        // ElementResolver's multilingual /match-label fallback hits the
+        // same worker. Setting the override here means we have one
+        // source of truth for the base URL.
+        ElementResolver.workerBaseURLOverride = url
+        return url
+    }()
 
     private lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
@@ -1461,6 +1468,29 @@ final class CompanionManager: ObservableObject {
     UI ELEMENT HINTS (set-of-marks):
     alongside screenshots you will sometimes receive a "UI elements on screen" message listing pointable elements as [role:label] tokens — for example [button:Save] [menu:File] [item:New File...] [tab:Preview] [field:Search].
     these labels come straight from the accessibility tree, so they are guaranteed to resolve. when a listed element matches what the user asked for, pass that EXACT label string (the part after the colon) to point_at_element or to a workflow step. if nothing matches, fall back to the visible text you see in the screenshot.
+
+    LANGUAGE RULE (CRITICAL — read every time):
+    the user may speak in ANY language. you respond in their language. but tool LABELS are different — they must EXACTLY match what is shown on the user's screen, in whatever language the UI is set to. you NEVER translate UI labels to match the user's spoken language.
+
+    rule of thumb: a label that the user can SEE on their screen is the only label that resolves. if the marks say [menu:File], pass "File" — even if the user asked in Hindi or Spanish. if the marks say [menu:Archivo] (the user has a Spanish-localized macOS), pass "Archivo" — even if the user asked in English. literal screen text always wins.
+
+    examples:
+      user (Hindi): "फ़ाइल मेनू कहाँ है"  (where is File menu)
+        screen shows: [menu:File]
+        → point_at_element(label: "File")     ✓
+        → point_at_element(label: "फ़ाइल")     ✗ won't resolve
+
+      user (English): "open the archivo menu"
+        screen shows: [menu:Archivo]
+        → point_at_element(label: "Archivo")  ✓
+        → point_at_element(label: "File")     ✗ won't resolve
+
+      user (Spanish): "donde está el botón guardar"
+        screen shows: [button:Save]
+        → point_at_element(label: "Save")     ✓
+        → point_at_element(label: "Guardar")  ✗ won't resolve
+
+    same rule applies for every step in submit_workflow_plan — each step's label MUST be the literal on-screen text. translate the `goal` and `hint` fields freely (those are for narration), but NEVER translate `label`.
 
     TOOL: submit_workflow_plan(goal, app, steps)
       use for ANYTHING that requires more than one click, including:
