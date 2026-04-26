@@ -286,9 +286,6 @@ final class CompanionManager: ObservableObject {
             || step.element.lowercased().contains("shift")
             || step.element.lowercased().contains("cmd")
 
-        let isScrollAction = step.action == "scroll"
-            || step.element.lowercased().contains("scroll")
-
         // Show unified step text — no separate bubble to avoid overlap
         onboardingPromptText = stepLabel
         onboardingPromptOpacity = 1.0
@@ -301,14 +298,6 @@ final class CompanionManager: ObservableObject {
             tutorialKeyLabel = extractKeyLabel(from: step.element)
             clearDetectedElementLocation()
             print("[Tutorial] Keyboard: \(tutorialKeyLabel)")
-            return
-        }
-
-        if isScrollAction {
-            tutorialActionType = "scroll"
-            tutorialKeyLabel = ""
-            clearDetectedElementLocation()
-            print("[Tutorial] Scroll action")
             return
         }
 

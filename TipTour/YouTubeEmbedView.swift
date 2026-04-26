@@ -44,7 +44,13 @@ struct YouTubeEmbedView: NSViewRepresentable {
         webView.layer?.backgroundColor = NSColor.black.cgColor
 
         controller.attach(webView: webView)
-        webView.loadHTMLString(html(forVideoID: videoID), baseURL: URL(string: "https://www.youtube.com")!)
+        // Critical: baseURL must NOT be a youtube.com origin. YouTube's
+        // IFrame Player rejects "self-embedding" attempts (error 152) when
+        // the Referer header matches youtube.com. Using a non-YouTube
+        // origin makes the embed look like any normal third-party page,
+        // matching how a regular `<iframe src="youtube.com/embed/...">`
+        // hosted on someone's website behaves.
+        webView.loadHTMLString(html(forVideoID: videoID), baseURL: URL(string: "https://tiptour.local/")!)
         return webView
     }
 
@@ -54,7 +60,13 @@ struct YouTubeEmbedView: NSViewRepresentable {
         // the player state.
         if controller.loadedVideoID != videoID {
             controller.loadedVideoID = videoID
-            webView.loadHTMLString(html(forVideoID: videoID), baseURL: URL(string: "https://www.youtube.com")!)
+            // Critical: baseURL must NOT be a youtube.com origin. YouTube's
+        // IFrame Player rejects "self-embedding" attempts (error 152) when
+        // the Referer header matches youtube.com. Using a non-YouTube
+        // origin makes the embed look like any normal third-party page,
+        // matching how a regular `<iframe src="youtube.com/embed/...">`
+        // hosted on someone's website behaves.
+        webView.loadHTMLString(html(forVideoID: videoID), baseURL: URL(string: "https://tiptour.local/")!)
         }
     }
 
@@ -88,7 +100,10 @@ struct YouTubeEmbedView: NSViewRepresentable {
                   rel: 0,
                   modestbranding: 1,
                   controls: 1,            // YouTube TOS requires controls visible
-                  iv_load_policy: 3       // hide annotations
+                  iv_load_policy: 3,      // hide annotations
+                  // origin must match our baseURL so YouTube's
+                  // postMessage handshake accepts our JS bridge calls.
+                  origin: 'https://tiptour.local'
                 },
                 events: {
                   onReady: () => {

@@ -153,7 +153,6 @@ struct BlueCursorView: View {
     /// The rotation angle of the triangle in degrees. Default is -35° (cursor-like).
     /// Changes to face the direction of travel when navigating to a target.
     @State private var triangleRotationDegrees: Double = -35.0
-    @State private var scrollBounceOffset: CGFloat = 0
 
     /// Speech bubble text shown when pointing at a detected element.
     @State private var navigationBubbleText: String = ""
@@ -311,17 +310,10 @@ struct BlueCursorView: View {
                 )
             }
 
-            // Tutorial action animations (keyboard keys, scroll indicator)
+            // Tutorial action animations (keyboard key caps).
             if companionManager.isTutorialActive {
                 TutorialActionOverlay(companionManager: companionManager, cursorPosition: cursorPosition)
                     .animation(.spring(response: 0.3, dampingFraction: 0.7), value: companionManager.tutorialActionType)
-
-                // Scroll pill — appears around the triangle
-                if companionManager.tutorialActionType == "scroll" {
-                    ScrollPillOverlay()
-                        .position(cursorPosition)
-                        .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                }
             }
 
             // Navigation pointer bubble — shown when buddy arrives at a detected element.
@@ -414,17 +406,10 @@ struct BlueCursorView: View {
                 // timer controls position directly at 60fps for a smooth arc flight.
                 Triangle()
                     .fill(DS.Colors.overlayCursorBlue)
-                    .frame(width: companionManager.tutorialActionType == "scroll" ? 12 : 16,
-                           height: companionManager.tutorialActionType == "scroll" ? 12 : 16)
-                    .rotationEffect(.degrees(
-                        companionManager.isTutorialActive && companionManager.tutorialActionType == "scroll"
-                        ? 180.0  // Point down for scroll
-                        : triangleRotationDegrees
-                    ))
+                    .frame(width: 16, height: 16)
+                    .rotationEffect(.degrees(triangleRotationDegrees))
                     .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
                     .scaleEffect(buddyFlightScale)
-                    .offset(y: companionManager.isTutorialActive && companionManager.tutorialActionType == "scroll"
-                        ? scrollBounceOffset : 0)
                     .opacity({
                         if !buddyIsVisibleOnThisScreen { return 0 }
                         if companionManager.voiceMode == .geminiLive { return cursorOpacity }
@@ -517,18 +502,6 @@ struct BlueCursorView: View {
         .onDisappear {
             timer?.invalidate()
             navigationAnimationTimer?.invalidate()
-        }
-        .onChange(of: companionManager.tutorialActionType) { actionType in
-            if actionType == "scroll" {
-                // Start bounce animation
-                withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
-                    scrollBounceOffset = 8
-                }
-            } else {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                    scrollBounceOffset = 0
-                }
-            }
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
             // When a UI element location is detected, navigate the buddy to
@@ -1097,26 +1070,3 @@ class OverlayWindowManager {
 }
 
 
-// MARK: - Scroll Pill Overlay
-
-/// A pill border that appears around the triangle when scroll action is active
-struct ScrollPillOverlay: View {
-    @State private var appeared = false
-
-    var body: some View {
-        Capsule()
-            .stroke(DS.Colors.overlayCursorBlue.opacity(0.5), lineWidth: 2)
-            .frame(width: 20, height: 40)
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.25), radius: 4)
-            .scaleEffect(appeared ? 1.0 : 0.3)
-            .opacity(appeared ? 1.0 : 0.0)
-            .onAppear {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
-                    appeared = true
-                }
-            }
-            .onDisappear {
-                appeared = false
-            }
-    }
-}

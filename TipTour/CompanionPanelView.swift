@@ -1418,15 +1418,6 @@ struct CompanionPanelView: View {
                 NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             }
 
-            devToolRow("Test Scroll Overlay", systemImage: "arrow.up.arrow.down") {
-                companionManager.isTutorialActive = true
-                companionManager.tutorialActionType = "scroll"
-                companionManager.onboardingPromptText = "Scroll"
-                companionManager.onboardingPromptOpacity = 1.0
-                companionManager.showOnboardingPrompt = true
-                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
-            }
-
             devToolRow("Reset All", systemImage: "xmark.circle", destructive: true) {
                 companionManager.clearDetectedElementLocation()
                 companionManager.onboardingPromptText = ""
