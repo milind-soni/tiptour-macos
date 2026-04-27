@@ -333,12 +333,21 @@ final class CompanionManager: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.timeoutInterval = 12
 
-        var body: [String: Any] = ["transcriptChunk": rawTranscriptChunk]
+        let userIsInBrowser = Self.isUserInBrowser()
+        var body: [String: Any] = [
+            "transcriptChunk": rawTranscriptChunk,
+            "isBrowser": userIsInBrowser,
+        ]
         if let screenshotBase64 = screenshotBase64 {
             body["screenshotBase64"] = screenshotBase64
         }
+        if let capture = cursorScreenCapture {
+            body["screenshotWidthPx"] = capture.screenshotWidthInPixels
+            body["screenshotHeightPx"] = capture.screenshotHeightInPixels
+        }
         guard let payload = try? JSONSerialization.data(withJSONObject: body) else { return }
         request.httpBody = payload
+        print("[Tutorial] /tutorial-chunk request: isBrowser=\(userIsInBrowser)")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -358,8 +367,12 @@ final class CompanionManager: ObservableObject {
                 print("[Tutorial] /tutorial-chunk: couldn't parse response")
                 return
             }
+            // Two response shapes depending on isBrowser:
+            //   • Native: { instruction, elementLabel? }
+            //   • Browser: { instruction, screenCoordinates: [x, y]? }
             let elementLabel = parsed["elementLabel"] as? String
-            print("[Tutorial] gemini → instruction=\"\(instruction)\" elementLabel=\(elementLabel ?? "<nil>")")
+            let screenCoordinates = parsed["screenCoordinates"] as? [Double]
+            print("[Tutorial] gemini → instruction=\"\(instruction)\" elementLabel=\(elementLabel ?? "<nil>") screenCoords=\(screenCoordinates.map { String(describing: $0) } ?? "<nil>")")
 
             await MainActor.run {
                 // Only apply if we're still in the .instruction phase
@@ -369,12 +382,24 @@ final class CompanionManager: ObservableObject {
                       self.tutorialDisplayPhase == .instruction else { return }
                 self.tutorialInstructionText = instruction
 
-                // Point the cursor at the element if Gemini gave us a
-                // confident label. Pass the screenshot capture we just
-                // took so YOLO can fall back when AX misses, and pass
-                // the user's actual frontmost app's name as the
-                // targetAppHint so the AX walk doesn't get pointed at
-                // TipTour's own pinned panel.
+                // Browser path: pixel coords from Gemini → screen
+                // coords via the existing screenshot-to-screen math.
+                // Skips AX entirely (browsers' AX trees aren't
+                // walkable for DOM content).
+                if let coords = screenCoordinates,
+                   coords.count == 2,
+                   let capture = cursorScreenCapture {
+                    self.pointTutorialCursorAtScreenshotPixels(
+                        x: coords[0],
+                        y: coords[1],
+                        capture: capture,
+                        labelForBubble: instruction
+                    )
+                    return
+                }
+
+                // Native path: label resolution via AX tree → YOLO →
+                // multilingual fallback (same as voice mode).
                 if let elementLabel = elementLabel,
                    !elementLabel.trimmingCharacters(in: .whitespaces).isEmpty {
                     self.pointTutorialCursorAt(label: elementLabel, capture: cursorScreenCapture)
@@ -383,6 +408,62 @@ final class CompanionManager: ObservableObject {
         } catch {
             print("[Tutorial] /tutorial-chunk failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Bundle IDs we treat as web browsers — their AX tree is mostly
+    /// flattened into AXWebArea blobs that AccessibilityTreeResolver
+    /// can't usefully walk, so for these the tutorial pipeline
+    /// switches to pure-vision pointing (Gemini returns pixel coords
+    /// from the screenshot, app converts to global screen coords).
+    private static let browserBundleIDsKnownToHaveFlattenedAX: Set<String> = [
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "com.google.Chrome.canary",
+        "com.microsoft.edgemac",
+        "com.microsoft.edgemac.Beta",
+        "com.brave.Browser",
+        "company.thebrowser.Browser",   // Arc
+        "company.thebrowser.dia",       // Dia
+        "org.mozilla.firefox",
+        "org.mozilla.nightly",
+        "com.operasoftware.Opera",
+        "com.vivaldi.Vivaldi",
+    ]
+
+    /// Returns true if the user's actual frontmost app (excluding
+    /// TipTour itself) is a known browser. Drives the
+    /// label-vs-pixel-coords branch in /tutorial-chunk requests.
+    private static func isUserInBrowser() -> Bool {
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let isTipTourFrontmost = frontmost?.bundleIdentifier == Bundle.main.bundleIdentifier
+        let trueFrontmost: NSRunningApplication?
+        if isTipTourFrontmost {
+            trueFrontmost = AccessibilityTreeResolver.userTargetAppOverride
+        } else {
+            trueFrontmost = frontmost
+        }
+        guard let bundleID = trueFrontmost?.bundleIdentifier else { return false }
+        return browserBundleIDsKnownToHaveFlattenedAX.contains(bundleID)
+    }
+
+    /// Fly the cursor to a (x, y) point in the screenshot's pixel
+    /// space. Used only when we're in a browser — Gemini returns
+    /// pixel coords directly because the DOM isn't reachable via AX.
+    /// Reuses ElementResolver's existing screenshot-pixel-to-global-
+    /// screen math via the `.llmRawCoordinates` resolution kind.
+    private func pointTutorialCursorAtScreenshotPixels(
+        x: Double,
+        y: Double,
+        capture: CompanionScreenCapture,
+        labelForBubble: String
+    ) {
+        let resolution = ElementResolver.shared.rawLLMCoordinate(
+            label: labelForBubble,
+            llmHintInScreenshotPixels: CGPoint(x: x, y: y),
+            capture: capture
+        )
+        print("[Tutorial] ✓ pointing (browser-vision) at (\(Int(x)),\(Int(y))) → screen \(resolution.globalScreenPoint)")
+        pointAtResolution(resolution)
     }
 
     /// Resolve `label` against the user's frontmost app and fly the

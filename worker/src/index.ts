@@ -182,12 +182,22 @@ async function handleTutorialChunk(request: Request, env: Env): Promise<Response
   const body = await request.json() as {
     transcriptChunk: string;
     screenshotBase64?: string;
+    /// When true, the user is in a browser. Browser AX trees are
+    /// flattened (Chrome, Arc, Edge, Firefox) so labels won't
+    /// resolve via macOS Accessibility. Switch to pixel-coordinate
+    /// pointing instead — Gemini returns the (x, y) of the target
+    /// element in the screenshot's pixel space and the app converts
+    /// to screen coords directly.
+    isBrowser?: boolean;
+    /// Width and height of the screenshot in pixels. Required when
+    /// isBrowser=true so the model knows the coordinate space its
+    /// (x, y) reply is in.
+    screenshotWidthPx?: number;
+    screenshotHeightPx?: number;
   };
 
-  const systemInstruction = `
-You are watching the user follow a YouTube software tutorial. The
-video just played a short segment with this transcript. Your job is
-to translate the narrator's words into a tight, imperative
+  const sharedRules = `
+Translate the narrator's words into a tight, imperative
 instruction the user can act on right now.
 
 Rules:
@@ -197,6 +207,41 @@ Rules:
 - Use → to chain steps ("Click File → New → Project").
 - If the segment is mid-explanation with no clear action, return a
   one-line summary of what the narrator just covered.
+`.trim();
+
+  // Two completely different system prompts depending on whether
+  // the user is in a native macOS app (label-based pointing works)
+  // or a browser (label-based pointing fails — pixel coords only).
+  const systemInstruction = body.isBrowser
+    ? `
+You are watching the user follow a YouTube software tutorial in a
+WEB BROWSER. The video just played a short segment with this
+transcript and a screenshot of the user's actual browser tab.
+
+${sharedRules}
+
+The user is in a browser, so element labels alone CANNOT be
+resolved (browser DOMs aren't exposed to macOS accessibility
+trees). Instead, you must return SCREEN PIXEL COORDINATES of the
+target element directly from the screenshot.
+
+The screenshot is ${body.screenshotWidthPx ?? "?"} pixels wide by
+${body.screenshotHeightPx ?? "?"} pixels tall. Origin is the
+TOP-LEFT corner. Pick the (x, y) at the center of the element
+the user should interact with.
+
+If the segment doesn't have a clear element to point at, return
+null for screenCoordinates.
+
+Return STRICT JSON only, no markdown:
+  { "instruction": "<imperative sentence>", "screenCoordinates": [x, y] or null }
+`.trim()
+    : `
+You are watching the user follow a YouTube software tutorial. The
+video just played a short segment with this transcript. The
+attached screenshot is the user's actual native macOS app.
+
+${sharedRules}
 
 If you can identify a SPECIFIC visible UI element on the user's
 screenshot that they should click for this step, also return the
@@ -207,6 +252,31 @@ confident, return null.
 Return STRICT JSON only, no markdown:
   { "instruction": "<imperative sentence>", "elementLabel": "<exact label>" or null }
 `.trim();
+
+  // The schema validation also branches: browser path gets
+  // screenCoordinates, native gets elementLabel.
+  const responseSchema = body.isBrowser
+    ? {
+        type: "object",
+        properties: {
+          instruction: { type: "string" },
+          screenCoordinates: {
+            type: "array",
+            items: { type: "number" },
+            minItems: 2,
+            maxItems: 2,
+          },
+        },
+        required: ["instruction"],
+      }
+    : {
+        type: "object",
+        properties: {
+          instruction: { type: "string" },
+          elementLabel: { type: "string" },
+        },
+        required: ["instruction"],
+      };
 
   const contentParts: any[] = [
     { text: `Transcript of the segment that just played:\n"${body.transcriptChunk}"` },
@@ -229,14 +299,7 @@ Return STRICT JSON only, no markdown:
           temperature: 0.1,
           maxOutputTokens: 256,
           responseMimeType: "application/json",
-          responseSchema: {
-            type: "object",
-            properties: {
-              instruction: { type: "string" },
-              elementLabel: { type: "string" },
-            },
-            required: ["instruction"],
-          },
+          responseSchema,
         },
       }),
     }
