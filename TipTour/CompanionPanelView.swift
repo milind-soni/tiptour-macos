@@ -1163,7 +1163,7 @@ struct CompanionPanelView: View {
 
     private var tutorialSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("YouTube Follow-Along")
+            Text("Tutorial")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(DS.Colors.textTertiary)
 
@@ -1210,36 +1210,204 @@ struct CompanionPanelView: View {
                     .font(.system(size: 10))
                     .foregroundColor(tutorialStatus.contains("Error") ? .red.opacity(0.7) : DS.Colors.textTertiary)
             }
+
+            // Tutorial surface. The YouTube embed and the instruction
+            // card occupy the same 16:9 frame and cross-fade as the
+            // CompanionManager flips tutorialDisplayPhase between
+            // .video (embed playing) and .instruction (transcript
+            // chunk shown for the user to act on). Only renders inline
+            // here when tutorialVideoMode == .menuBar — the cursor-
+            // following mode renders the same swap in OverlayWindow
+            // next to the cursor instead.
+            if companionManager.isTutorialActive,
+               companionManager.tutorialVideoMode == .menuBar,
+               let embedController = companionManager.tutorialEmbedController,
+               let videoID = companionManager.activeTutorialVideoID {
+                tutorialSwapSurface(videoID: videoID, controller: embedController)
+                tutorialControlsRow
+            }
+
+            tutorialVideoModeToggleRow
         }
+    }
+
+    /// Row of compact tutorial controls under the swap surface:
+    /// Replay current chunk · Play/Pause · Skip · Stop. Bigger and
+    /// more discoverable than the hotkeys (which still work in
+    /// parallel), and works in both menu-bar and cursor-following
+    /// modes — when the panel is open the user has both options.
+    private var tutorialControlsRow: some View {
+        HStack(spacing: 6) {
+            tutorialIconButton(systemImage: "backward.fill", help: "Replay this chunk") {
+                companionManager.replayCurrentTutorialChunk()
+            }
+            tutorialIconButton(
+                systemImage: companionManager.isTutorialPaused ? "play.fill" : "pause.fill",
+                help: companionManager.isTutorialPaused ? "Resume" : "Pause"
+            ) {
+                companionManager.toggleTutorialPause()
+            }
+            tutorialIconButton(systemImage: "forward.fill", help: "Skip ahead") {
+                companionManager.skipTutorialChunk()
+            }
+            Spacer()
+            tutorialIconButton(systemImage: "stop.fill", help: "Stop", isDestructive: true) {
+                companionManager.stopTutorial()
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func tutorialIconButton(
+        systemImage: String,
+        help: String,
+        isDestructive: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(isDestructive ? .red.opacity(0.85) : DS.Colors.textPrimary)
+                .frame(width: 26, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.white.opacity(0.06))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .help(help)
+    }
+
+    /// Lets the user choose where the tutorial swap surface renders:
+    /// inside this menu bar panel (default) or as a chip following
+    /// the cursor.
+    private var tutorialVideoModeToggleRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "rectangle.on.rectangle")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+            Text("Video plays")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(DS.Colors.textTertiary)
+            Spacer()
+            HStack(spacing: 0) {
+                tutorialVideoModeOptionButton(label: "Menu Bar", mode: .menuBar)
+                tutorialVideoModeOptionButton(label: "Cursor", mode: .cursorFollowing)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+        }
+        .padding(.top, 4)
+    }
+
+    private func tutorialVideoModeOptionButton(
+        label: String,
+        mode: CompanionManager.TutorialVideoMode
+    ) -> some View {
+        let isSelected = companionManager.tutorialVideoMode == mode
+        return Button(action: {
+            companionManager.setTutorialVideoMode(mode)
+        }) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(isSelected ? .white : DS.Colors.textTertiary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(isSelected ? DS.Colors.accent : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    /// Stacks the YouTube embed and the instruction card in the same
+    /// 16:9 area and cross-fades them based on tutorialDisplayPhase.
+    /// The embed stays mounted in both phases (just opacity-toggled)
+    /// so we don't lose player state between swaps.
+    ///
+    /// Note: The panel content is 320pt wide minus 16pt of horizontal
+    /// padding on each side = 288pt available. The embed used to use
+    /// `.aspectRatio(.fit)` which collapsed to its (zero) intrinsic
+    /// size on first layout — explicit `.frame(maxWidth: .infinity,
+    /// minHeight:...)` forces a real size from the moment the WKWebView
+    /// loads, so the IFrame Player initializes at the right dimensions
+    /// and doesn't render tiny.
+    private func tutorialSwapSurface(videoID: String, controller: YouTubeEmbedController) -> some View {
+        ZStack {
+            YouTubeEmbedView(videoID: videoID, controller: controller)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .opacity(companionManager.tutorialDisplayPhase == .video ? 1 : 0)
+                .allowsHitTesting(companionManager.tutorialDisplayPhase == .video)
+
+            tutorialInstructionCard
+                .opacity(companionManager.tutorialDisplayPhase == .instruction ? 1 : 0)
+                .allowsHitTesting(companionManager.tutorialDisplayPhase == .instruction)
+        }
+        .frame(maxWidth: .infinity, minHeight: 162, idealHeight: 162)
+    }
+
+    /// The card shown in place of the embed during the .instruction
+    /// phase. Shows the raw transcript text instantly; if Gemini's
+    /// `/tutorial-chunk` response lands within the swap window, the
+    /// text upgrades to a tight imperative ("Click File → New") and
+    /// the cursor flies to the named element on the user's app.
+    private var tutorialInstructionCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "hand.point.up.left.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(DS.Colors.accent)
+                Text("Your turn")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(DS.Colors.textSecondary)
+                Spacer()
+                if companionManager.isTutorialInstructionLoading {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(0.45)
+                        .frame(width: 12, height: 12)
+                }
+            }
+
+            Text(companionManager.tutorialInstructionText)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(DS.Colors.textPrimary)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(6)
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(DS.Colors.accent.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(DS.Colors.accent.opacity(0.35), lineWidth: 0.8)
+        )
     }
 
     private func startTutorial() {
         let urlString = tutorialURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !urlString.isEmpty else { return }
-
-        isTutorialLoading = true
-        tutorialStatus = "Extracting transcript..."
-
-        Task {
-            do {
-                let result = try await TutorialGuideGenerator.generate(youtubeURL: urlString) { status in
-                    Task { @MainActor in
-                        tutorialStatus = status
-                    }
-                }
-
-                await MainActor.run {
-                    tutorialStatus = "Ready! \(result.guide.steps.count) steps extracted"
-                    isTutorialLoading = false
-                    companionManager.startTutorial(guide: result.guide, videoPath: result.videoPath)
-                }
-            } catch {
-                await MainActor.run {
-                    tutorialStatus = "Error: \(error.localizedDescription)"
-                    isTutorialLoading = false
-                }
-            }
-        }
+        tutorialStatus = ""
+        companionManager.startTutorial(youtubeURL: urlString)
     }
 
     // MARK: - Feedback Button
@@ -1341,34 +1509,6 @@ struct CompanionPanelView: View {
                 companionManager.detectedElementScreenLocation = CGPoint(x: s.frame.midX, y: s.frame.midY)
                 companionManager.detectedElementDisplayFrame = s.frame
                 companionManager.detectedElementBubbleText = "Test"
-                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
-            }
-
-            devToolRow("Start Demo Tutorial", systemImage: "play") {
-                companionManager.startDemoTutorial()
-                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
-            }
-
-            devToolRow("Advance Step", systemImage: "forward") {
-                companionManager.advanceTutorial()
-            }
-
-            devToolRow("Test Keyboard Overlay", systemImage: "keyboard") {
-                companionManager.isTutorialActive = true
-                companionManager.tutorialActionType = "keyboard"
-                companionManager.tutorialKeyLabel = "G"
-                companionManager.onboardingPromptText = "Press G"
-                companionManager.onboardingPromptOpacity = 1.0
-                companionManager.showOnboardingPrompt = true
-                NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
-            }
-
-            devToolRow("Test Scroll Overlay", systemImage: "arrow.up.arrow.down") {
-                companionManager.isTutorialActive = true
-                companionManager.tutorialActionType = "scroll"
-                companionManager.onboardingPromptText = "Scroll"
-                companionManager.onboardingPromptOpacity = 1.0
-                companionManager.showOnboardingPrompt = true
                 NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
             }
 

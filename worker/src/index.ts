@@ -4,15 +4,15 @@ import { YoutubeTranscript } from "youtube-transcript";
  * TipTour Proxy Worker
  *
  * Thin Cloudflare Worker that proxies the Gemini API calls and the
- * YouTube-transcript → Gemini guide-generation pipeline, so the app
- * ships without raw API keys. Keys are stored as Cloudflare secrets.
+ * YouTube transcript fetcher, so the app ships without raw API keys.
+ * Keys are stored as Cloudflare secrets.
  *
  * Routes:
  *   GET  /gemini-live-key  → returns the Gemini API key so the app can
  *                            open a direct WebSocket to Gemini Live.
- *   POST /generate-guide   → Gemini 2.5 Flash for turning a YouTube
- *                            transcript into a structured tutorial guide.
  *   POST /transcript       → Fetches a YouTube transcript by video ID.
+ *   POST /match-label      → Multilingual label matcher used by the
+ *                            in-app ElementResolver fallback.
  */
 
 interface Env {
@@ -35,16 +35,16 @@ export default {
     }
 
     try {
-      if (url.pathname === "/generate-guide") {
-        return await handleGenerateGuide(request, env);
-      }
-
       if (url.pathname === "/transcript") {
         return await handleTranscript(request);
       }
 
       if (url.pathname === "/match-label") {
         return await handleMatchLabel(request, env);
+      }
+
+      if (url.pathname === "/tutorial-chunk") {
+        return await handleTutorialChunk(request, env);
       }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
@@ -83,37 +83,6 @@ async function handleTranscript(request: Request): Promise<Response> {
       headers: { "content-type": "application/json" },
     });
   }
-}
-
-async function handleGenerateGuide(request: Request, env: Env): Promise<Response> {
-  const body = await request.json() as { transcript: string };
-
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: body.transcript }] }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 65536 },
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error(`[/generate-guide] Gemini error ${response.status}: ${errorBody}`);
-    return new Response(errorBody, {
-      status: response.status,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  const data = await response.text();
-  return new Response(data, {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
 }
 
 /**
@@ -182,6 +151,102 @@ async function handleMatchLabel(request: Request, env: Env): Promise<Response> {
     console.error(`[/match-label] Gemini error ${response.status}: ${errorBody}`);
     return new Response(JSON.stringify({ match: null }), {
       status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  const data = await response.text();
+  return new Response(data, {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * /tutorial-chunk
+ *
+ * Body: { transcriptChunk: string, screenshotBase64?: string }
+ *
+ * Called from the app every time the tutorial swaps from .video to
+ * .instruction. Takes the raw transcript text from the 10-second
+ * segment that just played plus an optional screenshot of the user's
+ * actual screen, and returns:
+ *   - a tight 1-2 sentence imperative instruction ("Click File → New")
+ *   - optionally an `elementLabel` the app should fly the cursor to
+ *     (must be visible text from the user's screenshot)
+ *
+ * Uses gemini-2.5-flash with structured output so the response is
+ * always parseable JSON. ~1-3s typical latency.
+ */
+async function handleTutorialChunk(request: Request, env: Env): Promise<Response> {
+  const body = await request.json() as {
+    transcriptChunk: string;
+    screenshotBase64?: string;
+  };
+
+  const systemInstruction = `
+You are watching the user follow a YouTube software tutorial. The
+video just played a short segment with this transcript. Your job is
+to translate the narrator's words into a tight, imperative
+instruction the user can act on right now.
+
+Rules:
+- 1-2 SHORT sentences max. Direct imperative voice ("Click File → New").
+- NO filler ("Now you can...", "What we want to do is...", "Let's...").
+- Reference specific menus / buttons / fields by name.
+- Use → to chain steps ("Click File → New → Project").
+- If the segment is mid-explanation with no clear action, return a
+  one-line summary of what the narrator just covered.
+
+If you can identify a SPECIFIC visible UI element on the user's
+screenshot that they should click for this step, also return the
+element's exact visible label as elementLabel. The label must be
+text the user can SEE on their screen RIGHT NOW. If you can't be
+confident, return null.
+
+Return STRICT JSON only, no markdown:
+  { "instruction": "<imperative sentence>", "elementLabel": "<exact label>" or null }
+`.trim();
+
+  const contentParts: any[] = [
+    { text: `Transcript of the segment that just played:\n"${body.transcriptChunk}"` },
+  ];
+  if (body.screenshotBase64) {
+    contentParts.push({
+      inlineData: { mimeType: "image/jpeg", data: body.screenshotBase64 },
+    });
+  }
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        contents: [{ parts: contentParts }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 256,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "object",
+            properties: {
+              instruction: { type: "string" },
+              elementLabel: { type: "string" },
+            },
+            required: ["instruction"],
+          },
+        },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`[/tutorial-chunk] Gemini error ${response.status}: ${errorBody}`);
+    return new Response(errorBody, {
+      status: response.status,
       headers: { "content-type": "application/json" },
     });
   }

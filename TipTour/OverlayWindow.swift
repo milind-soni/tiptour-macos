@@ -153,7 +153,6 @@ struct BlueCursorView: View {
     /// The rotation angle of the triangle in degrees. Default is -35° (cursor-like).
     /// Changes to face the direction of travel when navigating to a target.
     @State private var triangleRotationDegrees: Double = -35.0
-    @State private var scrollBounceOffset: CGFloat = 0
 
     /// Speech bubble text shown when pointing at a detected element.
     @State private var navigationBubbleText: String = ""
@@ -194,11 +193,6 @@ struct BlueCursorView: View {
     /// Opacity of the entire fencing trail overlay. Held at 1.0 during flight
     /// and animated to 0.0 over ~0.3s after landing for a smooth dissolve.
     @State private var flightTrailOpacity: Double = 0.0
-
-    // MARK: - Onboarding Video Layout
-
-    private let onboardingVideoPlayerWidth: CGFloat = 330
-    private let onboardingVideoPlayerHeight: CGFloat = 186
 
     private let fullWelcomeMessage = "hey! i'm tiptour"
 
@@ -247,22 +241,6 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Onboarding video — always in the view tree so opacity animation works
-            // reliably. When no player exists or opacity is 0, nothing is visible.
-            // allowsHitTesting(false) prevents it from intercepting clicks.
-            OnboardingVideoPlayerView(player: companionManager.onboardingVideoPlayer)
-                .frame(width: onboardingVideoPlayerWidth, height: onboardingVideoPlayerHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .shadow(color: Color.black.opacity(0.4 * companionManager.onboardingVideoOpacity), radius: 12, x: 0, y: 6)
-                .opacity(isCursorOnThisScreen ? companionManager.onboardingVideoOpacity : 0)
-                .position(
-                    x: cursorPosition.x + bubbleLeftOffsetFromCursor + (onboardingVideoPlayerWidth / 2),
-                    y: cursorPosition.y + bubbleTopOffsetFromCursor + (onboardingVideoPlayerHeight / 2)
-                )
-                .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                .animation(.easeInOut(duration: 2.0), value: companionManager.onboardingVideoOpacity)
-                .allowsHitTesting(false)
-
             // Onboarding prompt — "press control + option and say hi" streamed after video ends
             if isCursorOnThisScreen && companionManager.showOnboardingPrompt && !companionManager.onboardingPromptText.isEmpty {
                 Text(companionManager.onboardingPromptText)
@@ -304,17 +282,68 @@ struct BlueCursorView: View {
                 )
             }
 
-            // Tutorial action animations (keyboard keys, scroll indicator)
-            if companionManager.isTutorialActive {
-                TutorialActionOverlay(companionManager: companionManager, cursorPosition: cursorPosition)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: companionManager.tutorialActionType)
+            // Tutorial swap surface (cursor-following mode). Same
+            // ZStack pattern as the menu bar embed: YouTubeEmbedView
+            // and instruction card layered, cross-fading on
+            // tutorialDisplayPhase. The chip is anchored to the right
+            // of the cursor position and is hit-testable so YouTube's
+            // controls remain usable. Only renders when
+            // tutorialVideoMode == .cursorFollowing.
+            if companionManager.isTutorialActive,
+               companionManager.tutorialVideoMode == .cursorFollowing,
+               isCursorOnThisScreen,
+               let embedController = companionManager.tutorialEmbedController,
+               let videoID = companionManager.activeTutorialVideoID {
+                ZStack {
+                    YouTubeEmbedView(videoID: videoID, controller: embedController)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .opacity(companionManager.tutorialDisplayPhase == .video ? 1 : 0)
+                        .allowsHitTesting(companionManager.tutorialDisplayPhase == .video)
 
-                // Scroll pill — appears around the triangle
-                if companionManager.tutorialActionType == "scroll" {
-                    ScrollPillOverlay()
-                        .position(cursorPosition)
-                        .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "hand.point.up.left.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(DS.Colors.overlayCursorBlue)
+                            Text("Your turn")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.85))
+                            Spacer()
+                            if companionManager.isTutorialInstructionLoading {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .scaleEffect(0.4)
+                                    .frame(width: 10, height: 10)
+                            }
+                        }
+                        Text(companionManager.tutorialInstructionText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(6)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.black.opacity(0.78))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(DS.Colors.overlayCursorBlue.opacity(0.45), lineWidth: 1)
+                    )
+                    .opacity(companionManager.tutorialDisplayPhase == .instruction ? 1 : 0)
                 }
+                .frame(width: 360, height: 200)  // 16:9-ish, comfortable reading size
+                .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 8)
+                .position(
+                    x: cursorPosition.x + 28 + 180,
+                    y: cursorPosition.y + 24 + 100
+                )
+                .animation(.spring(response: 0.25, dampingFraction: 0.7, blendDuration: 0), value: cursorPosition)
+                .animation(.easeInOut(duration: 0.4), value: companionManager.tutorialDisplayPhase)
             }
 
             // Navigation pointer bubble — shown when buddy arrives at a detected element.
@@ -407,17 +436,10 @@ struct BlueCursorView: View {
                 // timer controls position directly at 60fps for a smooth arc flight.
                 Triangle()
                     .fill(DS.Colors.overlayCursorBlue)
-                    .frame(width: companionManager.tutorialActionType == "scroll" ? 12 : 16,
-                           height: companionManager.tutorialActionType == "scroll" ? 12 : 16)
-                    .rotationEffect(.degrees(
-                        companionManager.isTutorialActive && companionManager.tutorialActionType == "scroll"
-                        ? 180.0  // Point down for scroll
-                        : triangleRotationDegrees
-                    ))
+                    .frame(width: 16, height: 16)
+                    .rotationEffect(.degrees(triangleRotationDegrees))
                     .shadow(color: DS.Colors.overlayCursorBlue, radius: 8 + (buddyFlightScale - 1.0) * 20, x: 0, y: 0)
                     .scaleEffect(buddyFlightScale)
-                    .offset(y: companionManager.isTutorialActive && companionManager.tutorialActionType == "scroll"
-                        ? scrollBounceOffset : 0)
                     .opacity({
                         if !buddyIsVisibleOnThisScreen { return 0 }
                         if companionManager.voiceMode == .geminiLive { return cursorOpacity }
@@ -425,7 +447,6 @@ struct BlueCursorView: View {
                         return cursorOpacity
                     }())
                     .scaleEffect(buddyFlightScale)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: companionManager.tutorialActionType)
                     .position(cursorPosition)
                     .animation(
                         buddyNavigationMode == .followingCursor
@@ -510,18 +531,6 @@ struct BlueCursorView: View {
         .onDisappear {
             timer?.invalidate()
             navigationAnimationTimer?.invalidate()
-        }
-        .onChange(of: companionManager.tutorialActionType) { actionType in
-            if actionType == "scroll" {
-                // Start bounce animation
-                withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
-                    scrollBounceOffset = 8
-                }
-            } else {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                    scrollBounceOffset = 0
-                }
-            }
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
             // When a UI element location is detected, navigate the buddy to
@@ -1089,67 +1098,4 @@ class OverlayWindowManager {
     }
 }
 
-// MARK: - Onboarding Video Player
 
-/// NSViewRepresentable wrapping an AVPlayerLayer so HLS video plays
-/// inside SwiftUI. Uses a custom NSView subclass to keep the player
-/// layer sized to the view's bounds automatically.
-private struct OnboardingVideoPlayerView: NSViewRepresentable {
-    let player: AVPlayer?
-
-    func makeNSView(context: Context) -> AVPlayerNSView {
-        let view = AVPlayerNSView()
-        view.player = player
-        return view
-    }
-
-    func updateNSView(_ nsView: AVPlayerNSView, context: Context) {
-        nsView.player = player
-    }
-}
-
-private class AVPlayerNSView: NSView {
-    var player: AVPlayer? {
-        didSet { playerLayer.player = player }
-    }
-
-    private let playerLayer = AVPlayerLayer()
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        playerLayer.videoGravity = .resizeAspectFill
-        layer?.addSublayer(playerLayer)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func layout() {
-        super.layout()
-        playerLayer.frame = bounds
-    }
-}
-
-// MARK: - Scroll Pill Overlay
-
-/// A pill border that appears around the triangle when scroll action is active
-struct ScrollPillOverlay: View {
-    @State private var appeared = false
-
-    var body: some View {
-        Capsule()
-            .stroke(DS.Colors.overlayCursorBlue.opacity(0.5), lineWidth: 2)
-            .frame(width: 20, height: 40)
-            .shadow(color: DS.Colors.overlayCursorBlue.opacity(0.25), radius: 4)
-            .scaleEffect(appeared ? 1.0 : 0.3)
-            .opacity(appeared ? 1.0 : 0.0)
-            .onAppear {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.6)) {
-                    appeared = true
-                }
-            }
-            .onDisappear {
-                appeared = false
-            }
-    }
-}

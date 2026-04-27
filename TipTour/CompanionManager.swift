@@ -44,14 +44,7 @@ final class CompanionManager: ObservableObject {
 
     // MARK: - Tutorial State
 
-    @Published var activeTutorial: TutorialGuide?
-    @Published var tutorialStepIndex: Int = 0
     @Published var isTutorialActive: Bool = false
-    @Published var tutorialVideoPlayer: AVPlayer?
-    @Published var showTutorialVideo: Bool = false
-    @Published var tutorialVideoOpacity: Double = 0.0
-    /// Current tutorial action type for animation rendering (keyboard, scroll, click, etc.)
-    @Published var tutorialActionType: String = ""
     /// Show YOLO detection boxes overlay — toggle from dev tools
     @Published var showDetectionOverlay: Bool = false
     /// Latest detected elements from native detector for overlay rendering
@@ -60,297 +53,526 @@ final class CompanionManager: ObservableObject {
     @Published var detectedImageSize: [Int] = [1512, 982]
     /// The element currently being highlighted (matched by voice query)
     @Published var highlightedElementLabel: String? = nil
-    /// Key label to display for keyboard actions (e.g. "G", "Ctrl+Z")
-    @Published var tutorialKeyLabel: String = ""
-    private var tutorialTimeObserver: Any?
-    private var tutorialSkipObserverUntil: Date = .distantPast
 
-    /// Start an interactive tutorial from a generated guide
-    func startTutorial(guide: TutorialGuide, videoPath: String? = nil) {
-        activeTutorial = guide
-        tutorialStepIndex = 0
+    /// Shared YouTube IFrame controller for the embedded tutorial
+    /// player. Created on tutorial start, torn down on stop.
+    @Published private(set) var tutorialEmbedController: YouTubeEmbedController?
+
+    /// The video ID currently loaded in the embed.
+    @Published private(set) var activeTutorialVideoID: String?
+
+    /// Tutorial UI flips between two display phases on a fixed cadence:
+    ///   .video       → YouTube embed visible, playing
+    ///   .instruction → embed paused + faded out, transcript chunk
+    ///                  visible in the same area for the user to act on
+    /// Driven by `tutorialSwapTimer`. Default `.video` so the very
+    /// first chunk plays immediately after startTutorial.
+    enum TutorialDisplayPhase {
+        case video
+        case instruction
+    }
+    @Published private(set) var tutorialDisplayPhase: TutorialDisplayPhase = .video
+
+    /// Where the tutorial swap surface (video ↔ instruction) renders:
+    ///   .menuBar         → inside the menu bar panel (default).
+    ///                      Panel auto-pins for the duration of the
+    ///                      tutorial so outside clicks don't dismiss it.
+    ///   .cursorFollowing → as a chip that floats next to the cursor
+    ///                      via OverlayWindow, matching the original
+    ///                      Clicky-era pattern.
+    /// Persisted in UserDefaults. Old "pip" values transparently
+    /// migrate to .menuBar.
+    enum TutorialVideoMode: String {
+        case menuBar
+        case cursorFollowing
+    }
+    @Published var tutorialVideoMode: TutorialVideoMode = {
+        let saved = UserDefaults.standard.string(forKey: "tutorialVideoMode") ?? ""
+        if saved == "pip" { return .menuBar }
+        return TutorialVideoMode(rawValue: saved) ?? .menuBar
+    }()
+
+    func setTutorialVideoMode(_ mode: TutorialVideoMode) {
+        tutorialVideoMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "tutorialVideoMode")
+        // If a tutorial is already running, the SwiftUI bindings on
+        // both the menu bar panel and the OverlayWindow react to this
+        // flip automatically — one disappears, the other appears.
+        // The shared YouTubeEmbedController + display phase carry
+        // over so the swap rhythm keeps going.
+    }
+
+    /// Transcript text shown during the .instruction phase. Pulled from
+    /// the cached transcript segments, sliced to the chunk that just
+    /// played. Empty when no transcript is available — the UI falls
+    /// back to a generic prompt.
+    @Published private(set) var tutorialInstructionText: String = ""
+
+    /// How long the video plays before swapping to the instruction.
+    private let tutorialVideoChunkDurationSeconds: TimeInterval = 10
+
+    /// How long the instruction stays on screen before swapping back.
+    private let tutorialInstructionDurationSeconds: TimeInterval = 5
+
+    /// Drives the alternation between .video and .instruction phases.
+    private var tutorialSwapTimer: Timer?
+
+    /// Global key monitor active only while a tutorial is running.
+    /// Listens passively for ⌃⌥+arrow / ⌃⌥+esc to control the swap
+    /// loop without intercepting keys (no extra permissions required).
+    private var tutorialHotkeyMonitor: Any?
+
+    /// Cached transcript segments for the active video. Each entry is
+    /// (timestampSeconds, text). Filled once at tutorial start.
+    private var tutorialTranscriptSegments: [(timeSeconds: Double, text: String)] = []
+
+    /// The video timestamp at which the most recent .video phase began.
+    /// Used to slice the transcript for the chunk that just played
+    /// when we swap to .instruction.
+    private var tutorialChunkStartSeconds: Double = 0
+
+    /// True when the user clicked Pause — both the swap loop AND the
+    /// embed are paused, and stay paused until they click Play again.
+    /// Different from tutorialDisplayPhase: the phase tells you which
+    /// surface is visible, this tells you whether time is advancing.
+    @Published private(set) var isTutorialPaused: Bool = false
+
+    /// True while we're awaiting the /tutorial-chunk worker response.
+    /// Drives the "..." spinner inside the instruction card so the
+    /// user knows the cleaned-up step is on the way.
+    @Published private(set) var isTutorialInstructionLoading: Bool = false
+
+    /// Start a YouTube follow-along tutorial from a pasted URL. The
+    /// minimal pipeline is: extract the video ID, mount a fresh
+    /// `YouTubeEmbedController`, and pop open the menu bar panel so
+    /// the embedded video appears. Phase E will rebuild the
+    /// transcript-chunks-to-Gemini-Live pipeline on top of this.
+    func startTutorial(youtubeURL: String) {
+        guard let videoID = Self.extractYouTubeID(from: youtubeURL) else {
+            print("[Tutorial] invalid URL: \(youtubeURL)")
+            return
+        }
+        activeTutorialVideoID = videoID
         isTutorialActive = true
+        tutorialDisplayPhase = .video
+        tutorialInstructionText = ""
+        tutorialChunkStartSeconds = 0
+        tutorialTranscriptSegments = []
 
-        print("[Tutorial] Starting: \(guide.title) (\(guide.steps.count) steps)")
+        let controller = YouTubeEmbedController()
+        tutorialEmbedController = controller
+        NotificationCenter.default.post(name: .tipTourShowMenuBarPanelForTutorial, object: nil)
+        print("[Tutorial] started videoID=\(videoID)")
 
-        // Play the local video file if available
-        let videoURL: URL?
-        if let path = videoPath {
-            videoURL = URL(fileURLWithPath: path)
-            print("[Tutorial] Playing local video: \(path)")
-        } else {
-            videoURL = nil
-            print("[Tutorial] No video file — steps only")
-        }
-
-        if let videoURL = videoURL {
-            let player = AVPlayer(url: videoURL)
-            player.isMuted = false
-            player.volume = 1.0
-            self.onboardingVideoPlayer = player
-            self.showOnboardingVideo = true
-
-            withAnimation(.easeIn(duration: 0.5)) {
-                self.onboardingVideoOpacity = 1.0
+        // Fetch transcript in the background — we don't block the
+        // first video chunk on this. If the fetch fails or the video
+        // has no captions, the .instruction phase falls back to a
+        // generic prompt instead of transcript text.
+        Task { [weak self, videoID] in
+            guard let self = self else { return }
+            let segments = await Self.fetchTranscriptSegments(videoID: videoID)
+            await MainActor.run {
+                self.tutorialTranscriptSegments = segments
+                print("[Tutorial] cached \(segments.count) transcript segments")
             }
-
-            player.play()
-            print("[Tutorial] Video playing")
-
-            setupTutorialTimeObserver(player: player)
         }
 
-        // Show first step hint on the cursor
-        if let firstStep = guide.steps.first {
-            showTutorialStep(firstStep)
+        // Kick off the alternation loop. First swap fires after the
+        // initial video chunk (~10s) plays.
+        scheduleNextTutorialSwap(after: tutorialVideoChunkDurationSeconds)
+        installTutorialHotkeyMonitorIfNeeded()
+    }
+
+    /// Pull the YouTube video ID out of a full watch / share URL.
+    private static func extractYouTubeID(from url: String) -> String? {
+        guard let components = URLComponents(string: url) else { return nil }
+        if let v = components.queryItems?.first(where: { $0.name == "v" })?.value {
+            return v
+        }
+        if components.host == "youtu.be" {
+            return String(components.path.dropFirst())
+        }
+        if components.path.contains("/embed/") {
+            return components.path.components(separatedBy: "/embed/").last
+        }
+        return nil
+    }
+
+    /// Stop the active YouTube tutorial. Tears down the embed controller
+    /// so the WKWebView can deallocate, clears any pointing bubble, and
+    /// flips `isTutorialActive` so the panel hides the embedded player.
+    func stopTutorial() {
+        isTutorialActive = false
+        activeTutorialVideoID = nil
+        tutorialEmbedController?.pause()
+        tutorialEmbedController = nil
+        detectedElementBubbleText = nil
+
+        tutorialSwapTimer?.invalidate()
+        tutorialSwapTimer = nil
+        tutorialDisplayPhase = .video
+        tutorialInstructionText = ""
+        tutorialTranscriptSegments = []
+        tutorialChunkStartSeconds = 0
+        isTutorialPaused = false
+        isTutorialInstructionLoading = false
+        removeTutorialHotkeyMonitor()
+    }
+
+    // MARK: - Tutorial swap loop
+
+    /// Schedule the next phase-flip. Single timer reused across both
+    /// directions of the alternation — invalidate + reschedule each
+    /// time so we never have overlapping timers firing.
+    private func scheduleNextTutorialSwap(after intervalSeconds: TimeInterval) {
+        tutorialSwapTimer?.invalidate()
+        tutorialSwapTimer = Timer.scheduledTimer(withTimeInterval: intervalSeconds, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.handleTutorialSwapTick() }
         }
     }
 
-    /// Advance to next tutorial step — called by hotkey or auto-detection
-    func advanceTutorial() {
-        guard isTutorialActive, let guide = activeTutorial else { return }
-        tutorialStepIndex += 1
-
-        if tutorialStepIndex >= guide.steps.count {
-            print("[Tutorial] Complete!")
-            stopTutorial()
-            detectedElementBubbleText = "Tutorial complete! 🎉"
-            return
-        }
-
-        let step = guide.steps[tutorialStepIndex]
-        print("[Tutorial] Step \(tutorialStepIndex + 1)/\(guide.steps.count): \(step.hint)")
-
-        // Seek video to this step's timestamp — video keeps playing
-        let seekTime = CMTime(seconds: step.timestamp, preferredTimescale: 600)
-        onboardingVideoPlayer?.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
-        onboardingVideoPlayer?.play()
-
-        showTutorialStep(step)
-    }
-
-    /// Load and start the pre-built demo tutorial
-    func startDemoTutorial() {
-        // Load demo guide from app bundle
-        guard let bundlePath = Bundle.main.path(forResource: "demo-guide", ofType: "json"),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: bundlePath)),
-              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            print("[Tutorial] demo-guide.json not found in bundle")
-            return
-        }
-
-        let title = raw["title"] as? String ?? "Demo"
-        let app = raw["app"] as? String ?? "Blender"
-        let rawSteps = raw["steps"] as? [[String: Any]] ?? []
-
-        let steps: [TutorialStep] = rawSteps.enumerated().map { i, dict in
-            TutorialStep(
-                id: "step-\(i+1)",
-                timestamp: dict["timestamp"] as? Double ?? 0,
-                action: dict["action"] as? String ?? "click",
-                element: dict["element"] as? String ?? "",
-                elementRole: dict["element_role"] as? String,
-                hint: dict["hint"] as? String ?? "",
-                narration: dict["narration"] as? String
-            )
-        }
-
-        let guide = TutorialGuide(title: title, app: app, steps: steps, videoURL: "https://www.youtube.com/watch?v=peSv5IT5Ve4")
-
-        // Download video if not cached
-        let videoID = "peSv5IT5Ve4"
-        let videoPath = NSTemporaryDirectory() + "tiptour-\(videoID).mp4"
-
-        if FileManager.default.fileExists(atPath: videoPath) {
-            startTutorial(guide: guide, videoPath: videoPath)
-        } else {
-            // Download in background, start without video for now
-            startTutorial(guide: guide, videoPath: nil)
-            Task {
-                if let downloadedPath = try? await TutorialGuideGenerator.downloadVideoPublic(videoID: videoID) {
-                    print("[Demo] Video downloaded: \(downloadedPath)")
+    /// Drives the alternation. Reads the current display phase and
+    /// flips to the other one, paying for the cross-fade animation
+    /// inside the SwiftUI bindings the panel observes.
+    private func handleTutorialSwapTick() {
+        guard isTutorialActive, let controller = tutorialEmbedController else { return }
+        switch tutorialDisplayPhase {
+        case .video:
+            // Video chunk just finished — pause embed, slice transcript
+            // for what just played, fade to instruction.
+            Task { [weak self] in
+                guard let self = self else { return }
+                let chunkEndSeconds = await controller.currentTimeSeconds()
+                await MainActor.run {
+                    self.swapVideoToInstruction(chunkStart: self.tutorialChunkStartSeconds, chunkEnd: chunkEndSeconds)
+                }
+            }
+        case .instruction:
+            // Instruction window over — capture the new chunk start
+            // (current video time), play, fade back to video.
+            Task { [weak self] in
+                guard let self = self else { return }
+                let nowSeconds = await controller.currentTimeSeconds()
+                await MainActor.run {
+                    self.swapInstructionBackToVideo(newChunkStart: nowSeconds)
                 }
             }
         }
-
-        print("[Demo] Loaded \(steps.count) steps")
     }
 
-    func stopTutorial() {
-        isTutorialActive = false
-        activeTutorial = nil
-        tutorialStepIndex = 0
+    /// Pause the embed, derive the instruction text from the chunk
+    /// that just played, and flip the display phase. Animation is
+    /// handled by SwiftUI's `withAnimation` on the published flag.
+    ///
+    /// Two-stage display so the user never sees a blank card while
+    /// Gemini is thinking:
+    ///   1. Immediately show the raw transcript text (snappy).
+    ///   2. In parallel, send the chunk + a fresh screenshot of the
+    ///      user's frontmost app to the worker's /tutorial-chunk
+    ///      route. When the response lands, replace the text with
+    ///      Gemini's tight imperative ("Click File → New") and fly
+    ///      the cursor to elementLabel via ElementResolver.
+    private func swapVideoToInstruction(chunkStart: Double, chunkEnd: Double) {
+        guard isTutorialActive else { return }
+        tutorialEmbedController?.pause()
 
-        if let observer = tutorialTimeObserver {
-            onboardingVideoPlayer?.removeTimeObserver(observer)
-            tutorialTimeObserver = nil
-        }
-        onboardingVideoPlayer?.pause()
+        // Slice the cached transcript for [chunkStart, chunkEnd].
+        let startWindow = max(0, chunkStart - 0.5)
+        let endWindow = chunkEnd + 0.5
+        let chunkText = tutorialTranscriptSegments
+            .filter { $0.timeSeconds >= startWindow && $0.timeSeconds < endWindow }
+            .map { $0.text }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        withAnimation(.easeOut(duration: 0.3)) {
-            onboardingVideoOpacity = 0.0
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            self.onboardingVideoPlayer = nil
-            self.showOnboardingVideo = false
-        }
-
-        detectedElementBubbleText = nil
-        onboardingPromptText = ""
-        onboardingPromptOpacity = 0.0
-        showOnboardingPrompt = false
-        tutorialActionType = ""
-        tutorialKeyLabel = ""
-        clearDetectedElementLocation()
-    }
-
-    private func showTutorialStep(_ step: TutorialStep) {
-        let total = activeTutorial?.steps.count ?? 0
-        let stepLabel = "Step \(tutorialStepIndex + 1)/\(total): \(step.hint)"
-
-        // Make sure overlay is visible
-        if !isOverlayVisible {
-            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
-            isOverlayVisible = true
+        // Stage 1: instant raw text so the card has SOMETHING to show.
+        if chunkText.isEmpty {
+            tutorialInstructionText = "Try what was just shown on your screen."
+        } else {
+            tutorialInstructionText = chunkText
         }
 
-        print("[Tutorial] → \(step.action) \"\(step.element)\" — \(step.hint)")
-
-        // Set action type for animation rendering
-        tutorialActionType = step.action
-
-        // Detect keyboard actions
-        let isKeyboardAction = step.action == "type" || step.action == "hold"
-            || step.element.lowercased().contains("key")
-            || step.element.lowercased().contains("shortcut")
-            || step.element.lowercased().contains("ctrl")
-            || step.element.lowercased().contains("shift")
-            || step.element.lowercased().contains("cmd")
-
-        let isScrollAction = step.action == "scroll"
-            || step.element.lowercased().contains("scroll")
-
-        // Show unified step text — no separate bubble to avoid overlap
-        onboardingPromptText = stepLabel
-        onboardingPromptOpacity = 1.0
-        showOnboardingPrompt = true
-        detectedElementBubbleText = nil  // prevent overlap
-
-        if isKeyboardAction {
-            tutorialActionType = "keyboard"
-            // Extract key label from element name (e.g. "G key" → "G", "Ctrl+Z" → "Ctrl+Z")
-            tutorialKeyLabel = extractKeyLabel(from: step.element)
-            clearDetectedElementLocation()
-            print("[Tutorial] Keyboard: \(tutorialKeyLabel)")
-            return
+        withAnimation(.easeInOut(duration: 0.4)) {
+            tutorialDisplayPhase = .instruction
         }
+        scheduleNextTutorialSwap(after: tutorialInstructionDurationSeconds)
 
-        if isScrollAction {
-            tutorialActionType = "scroll"
-            tutorialKeyLabel = ""
-            clearDetectedElementLocation()
-            print("[Tutorial] Scroll action")
-            return
-        }
-
-        // Click/drag actions — screenshot + point
-        tutorialKeyLabel = ""
-        Task {
-            await pointCursorForStep(step)
+        // Stage 2: ask Gemini to clean up the transcript into a tight
+        // imperative + identify a screen element to point at. Don't
+        // block the swap on this; let it land asynchronously.
+        guard !chunkText.isEmpty else { return }
+        Task { [weak self, chunkText] in
+            await self?.processChunkInstruction(rawTranscriptChunk: chunkText)
         }
     }
 
-    /// Extract the key label from an element name like "G key", "Number pad '3'", "Ctrl+Z"
-    private func extractKeyLabel(from element: String) -> String {
-        let el = element.trimmingCharacters(in: .whitespaces)
+    /// Hit the worker's /tutorial-chunk route with the just-played
+    /// transcript + a screenshot of the user's frontmost app. When
+    /// the response lands (assuming we're still in .instruction phase
+    /// for THIS chunk), replace the instruction text and fly the
+    /// cursor to the suggested element. Best-effort — failures fall
+    /// back to the raw transcript text already displayed.
+    private func processChunkInstruction(rawTranscriptChunk: String) async {
+        await MainActor.run { self.isTutorialInstructionLoading = true }
+        defer { Task { @MainActor in self.isTutorialInstructionLoading = false } }
 
-        // "G key" → "G"
-        if el.lowercased().hasSuffix(" key") {
-            return String(el.dropLast(4)).trimmingCharacters(in: .whitespaces)
+        // Capture the user's actual screen ONCE — used for both
+        // Gemini's chunk processing AND the cursor-pointing
+        // ElementResolver call below. Without a real CompanionScreenCapture
+        // the resolver can't run YOLO fallback, so this is the only
+        // way the cursor pointing actually works in tutorial mode.
+        let cursorScreenCapture: CompanionScreenCapture? = await {
+            guard let captures = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else { return nil }
+            return captures.first(where: { $0.isCursorScreen }) ?? captures.first
+        }()
+        let screenshotBase64 = cursorScreenCapture?.imageData.base64EncodedString()
+
+        guard let url = URL(string: "\(Self.workerBaseURL)/tutorial-chunk") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.timeoutInterval = 12
+
+        var body: [String: Any] = ["transcriptChunk": rawTranscriptChunk]
+        if let screenshotBase64 = screenshotBase64 {
+            body["screenshotBase64"] = screenshotBase64
         }
-
-        // "Number pad '3'" → "3"
-        if let match = el.range(of: #"'([^']+)'"#, options: .regularExpression) {
-            return String(el[match]).replacingOccurrences(of: "'", with: "")
-        }
-
-        // "Ctrl+Z", "Shift+A" → as-is
-        if el.contains("+") { return el }
-
-        // "Tab key" already handled, "Delete key" etc.
-        return el.replacingOccurrences(of: " key", with: "")
-    }
-
-    /// Takes a screenshot, finds the element via native detector (local) or Claude (fallback).
-    private func pointCursorForStep(_ step: TutorialStep) async {
-        guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG() else {
-            print("[Tutorial] Screenshot failed")
-            return
-        }
-
-        guard let primary = screenshots.first else { return }
-
-        // Try native detector first (on-device, fast, no API cost)
-        if let cgImage = Self.cgImage(from: primary.imageData),
-           let found = await NativeElementDetector.shared.findElement(query: step.element, in: cgImage) {
-            print("[Tutorial] NativeDetector found \"\(found.label)\" at (\(Int(found.center.x)),\(Int(found.center.y)))")
-            await MainActor.run {
-                self.pointAtScreenPixel(found.center, capture: primary, label: step.element)
-            }
-            return
-        }
-
-        print("[Tutorial] NativeDetector miss — falling back to Gemma")
-
-        // Gemma needs base64 for its vision API
-        let base64Image = primary.imageData.base64EncodedString()
-
-        // Fallback: Gemma 4 via OpenRouter (fast, vision-capable)
-        let tutorialContext = activeTutorial.map { "Tutorial: \($0.title) in \($0.app)" } ?? ""
-        let requestBody: [String: Any] = [
-            "model": "google/gemma-4-31b-it",
-            "max_tokens": 200,
-            "messages": [
-                ["role": "system", "content": "You see a screenshot of a macOS app (\(primary.label)). \(tutorialContext). Reply with ONLY [POINT:\(step.element)] — the app has on-device element detection that will locate the element by name. Do NOT guess coordinates. If the element isn't visible, reply [POINT:none]."],
-                ["role": "user", "content": [
-                    ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64Image)"]],
-                    ["type": "text", "text": "\(step.action) \"\(step.element)\". Point at it."]
-                ]]
-            ]
-        ]
+        guard let payload = try? JSONSerialization.data(withJSONObject: body) else { return }
+        request.httpBody = payload
 
         do {
-            let requestData = try JSONSerialization.data(withJSONObject: requestBody)
-            var request = URLRequest(url: URL(string: "\(CompanionManager.workerBaseURL)/chat-fast")!)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "content-type")
-            request.httpBody = requestData
-            request.timeoutInterval = 15
-
-            let (data, _) = try await URLSession.shared.data(for: request)
-
-            // OpenRouter returns OpenAI format
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let message = choices.first?["message"] as? [String: Any],
-                  let fullText = message["content"] as? String else {
-                let raw = String(data: data, encoding: .utf8) ?? ""
-                print("[Tutorial] OpenRouter parse fail: \(raw.prefix(200))")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                print("[Tutorial] /tutorial-chunk returned \(http.statusCode)")
                 return
             }
+            // Gemini wraps responseSchema output inside its candidates envelope.
+            guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let candidates = envelope["candidates"] as? [[String: Any]],
+                  let content = candidates.first?["content"] as? [String: Any],
+                  let parts = content["parts"] as? [[String: Any]],
+                  let innerText = parts.first?["text"] as? String,
+                  let innerData = innerText.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: innerData) as? [String: Any],
+                  let instruction = parsed["instruction"] as? String else {
+                print("[Tutorial] /tutorial-chunk: couldn't parse response")
+                return
+            }
+            let elementLabel = parsed["elementLabel"] as? String
+            print("[Tutorial] gemini → instruction=\"\(instruction)\" elementLabel=\(elementLabel ?? "<nil>")")
 
-            print("[Tutorial] Gemma: \(fullText)")
+            await MainActor.run {
+                // Only apply if we're still in the .instruction phase
+                // — if the user already advanced to the next chunk
+                // we'd otherwise overwrite their current text.
+                guard self.isTutorialActive,
+                      self.tutorialDisplayPhase == .instruction else { return }
+                self.tutorialInstructionText = instruction
 
-            let parseResult = CompanionManager.parsePointingCoordinates(from: fullText)
-            if let coord = parseResult.coordinate {
-                await MainActor.run {
-                    self.pointAtScreenPixel(coord, capture: primary, label: parseResult.elementLabel ?? step.element)
+                // Point the cursor at the element if Gemini gave us a
+                // confident label. Pass the screenshot capture we just
+                // took so YOLO can fall back when AX misses, and pass
+                // the user's actual frontmost app's name as the
+                // targetAppHint so the AX walk doesn't get pointed at
+                // TipTour's own pinned panel.
+                if let elementLabel = elementLabel,
+                   !elementLabel.trimmingCharacters(in: .whitespaces).isEmpty {
+                    self.pointTutorialCursorAt(label: elementLabel, capture: cursorScreenCapture)
                 }
             }
         } catch {
-            print("[Tutorial] Gemma error: \(error.localizedDescription)")
+            print("[Tutorial] /tutorial-chunk failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Resolve `label` against the user's frontmost app and fly the
+    /// cursor there. Same pipeline used by voice mode's
+    /// point_at_element tool — AX tree first, YOLO next, raw LLM
+    /// coords as last resort. Quiet on failure (just prints).
+    private func pointTutorialCursorAt(label: String, capture: CompanionScreenCapture?) {
+        // Determine which app the AX walk should target. While a
+        // tutorial is running the menu bar panel is pinned and
+        // visible, so NSWorkspace.frontmostApplication often returns
+        // TipTour itself. Fall back to userTargetAppOverride (the
+        // continuous tracker maintained by AccessibilityTreeResolver
+        // that ignores TipTour's own activations).
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let isTipTourFrontmost = frontmost?.bundleIdentifier == Bundle.main.bundleIdentifier
+        let targetAppHint: String? = {
+            if isTipTourFrontmost {
+                return AccessibilityTreeResolver.userTargetAppOverride?.localizedName
+            }
+            return frontmost?.localizedName
+        }()
+        print("[Tutorial] pointTutorialCursorAt(label=\"\(label)\") targetApp=\(targetAppHint ?? "<nil>") hasCapture=\(capture != nil)")
+
+        Task { [weak self, capture, targetAppHint] in
+            guard let self = self else { return }
+            let resolution = await ElementResolver.shared.resolve(
+                label: label,
+                llmHintInScreenshotPixels: nil,
+                latestCapture: capture,
+                targetAppHint: targetAppHint
+            )
+            guard let resolution = resolution else {
+                print("[Tutorial] ✗ couldn't resolve \"\(label)\"")
+                return
+            }
+            print("[Tutorial] ✓ pointing at \"\(label)\" via \(resolution.source) → \(resolution.globalScreenPoint)")
+            await MainActor.run {
+                self.pointAtResolution(resolution)
+            }
+        }
+    }
+
+    // MARK: - Pause / resume
+
+    /// Toggle the pause state. When pausing: invalidate the swap
+    /// timer and pause the embed. When resuming: restart the swap
+    /// timer for the appropriate phase and resume embed playback.
+    func toggleTutorialPause() {
+        guard isTutorialActive else { return }
+        if isTutorialPaused {
+            isTutorialPaused = false
+            // Resume from current phase: if we're in .video, restart
+            // the chunk timer; if .instruction, restart the
+            // instruction timer.
+            if tutorialDisplayPhase == .video {
+                tutorialEmbedController?.play()
+                scheduleNextTutorialSwap(after: tutorialVideoChunkDurationSeconds)
+            } else {
+                scheduleNextTutorialSwap(after: tutorialInstructionDurationSeconds)
+            }
+        } else {
+            isTutorialPaused = true
+            tutorialSwapTimer?.invalidate()
+            tutorialSwapTimer = nil
+            tutorialEmbedController?.pause()
+        }
+    }
+
+    /// Resume the embed and flip back to the video phase. Capture the
+    /// new chunkStart from the current video time so the next
+    /// transcript slice picks up where this chunk begins.
+    private func swapInstructionBackToVideo(newChunkStart: Double) {
+        guard isTutorialActive else { return }
+        tutorialChunkStartSeconds = newChunkStart
+        withAnimation(.easeInOut(duration: 0.4)) {
+            tutorialDisplayPhase = .video
+        }
+        tutorialEmbedController?.play()
+        scheduleNextTutorialSwap(after: tutorialVideoChunkDurationSeconds)
+    }
+
+    // MARK: - Tutorial hotkeys (⌃⌥+arrow / ⌃⌥+esc)
+
+    /// Force the swap loop forward immediately. If we're in the
+    /// .video phase, jump to the .instruction phase right now (don't
+    /// wait the full 10s). If we're in .instruction, jump back to
+    /// .video and start the next chunk.
+    func skipTutorialChunk() {
+        guard isTutorialActive else { return }
+        handleTutorialSwapTick()
+    }
+
+    /// Replay the current chunk: rewind the embed to chunkStart and
+    /// reset the swap loop into .video phase from the top of this
+    /// chunk. Useful when the user missed something and wants to
+    /// re-watch the same 10s.
+    func replayCurrentTutorialChunk() {
+        guard isTutorialActive, let controller = tutorialEmbedController else { return }
+        let chunkStart = tutorialChunkStartSeconds
+        controller.seek(toSeconds: chunkStart)
+        controller.play()
+        withAnimation(.easeInOut(duration: 0.4)) {
+            tutorialDisplayPhase = .video
+        }
+        scheduleNextTutorialSwap(after: tutorialVideoChunkDurationSeconds)
+    }
+
+    /// Install the global key monitor for tutorial controls.
+    /// NSEvent.addGlobalMonitorForEvents is passive (observes only,
+    /// doesn't intercept) so it requires no extra permissions and
+    /// doesn't impact the user's normal typing.
+    private func installTutorialHotkeyMonitorIfNeeded() {
+        guard tutorialHotkeyMonitor == nil else { return }
+        tutorialHotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return }
+            // Required modifiers: Control + Option, no Cmd, no Shift.
+            let interestingFlags = event.modifierFlags.intersection([.control, .option, .command, .shift])
+            guard interestingFlags == [.control, .option] else { return }
+
+            // Key codes (US layout): 124=Right, 123=Left, 53=Esc.
+            switch event.keyCode {
+            case 124:
+                Task { @MainActor in self.skipTutorialChunk() }
+            case 123:
+                Task { @MainActor in self.replayCurrentTutorialChunk() }
+            case 53:
+                Task { @MainActor in self.stopTutorial() }
+            default:
+                break
+            }
+        }
+    }
+
+    private func removeTutorialHotkeyMonitor() {
+        if let monitor = tutorialHotkeyMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        tutorialHotkeyMonitor = nil
+    }
+
+    // MARK: - Transcript fetch
+
+    /// Hit the worker's /transcript route to pull the YouTube
+    /// transcript as `[m:ss] text` lines, then parse to (seconds, text)
+    /// tuples. Off-main + best-effort — failure returns an empty array
+    /// so the swap loop just falls back to the generic prompt.
+    private static func fetchTranscriptSegments(videoID: String) async -> [(timeSeconds: Double, text: String)] {
+        guard let url = URL(string: "\(workerBaseURL)/transcript") else { return [] }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.timeoutInterval = 15
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["videoID": videoID])
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                print("[Tutorial] transcript fetch returned \(http.statusCode)")
+                return []
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let raw = json["transcript"] as? String else {
+                return []
+            }
+            return parseTimestampedTranscript(raw)
+        } catch {
+            print("[Tutorial] transcript fetch failed: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    /// Parse the worker's "[m:ss] text" formatted transcript lines
+    /// into (seconds, text) tuples. Lines that don't start with the
+    /// `[m:ss]` prefix are skipped quietly.
+    private static func parseTimestampedTranscript(_ text: String) -> [(timeSeconds: Double, text: String)] {
+        var segments: [(Double, String)] = []
+        for line in text.components(separatedBy: .newlines) {
+            guard line.hasPrefix("["),
+                  let closeIndex = line.firstIndex(of: "]") else { continue }
+            let timeRange = line.index(after: line.startIndex)..<closeIndex
+            let timeString = String(line[timeRange])
+            let parts = timeString.split(separator: ":").compactMap { Int($0) }
+            guard parts.count == 2 else { continue }
+            let seconds = Double(parts[0] * 60 + parts[1])
+            let textPart = String(line[line.index(after: closeIndex)...]).trimmingCharacters(in: .whitespaces)
+            if !textPart.isEmpty {
+                segments.append((seconds, textPart))
+            }
+        }
+        return segments
     }
 
     /// Queue labels to point at sequentially — for multi-step navigation.
@@ -445,44 +667,6 @@ final class CompanionManager: ObservableObject {
         detectedElementDisplayFrame = resolution.displayFrame
         detectedElementBubbleText = resolution.label
     }
-
-    private func setupTutorialTimeObserver(player: AVPlayer) {
-        // Check time every 0.5s to pause at step timestamps
-        let interval = CMTime(seconds: 0.5, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        tutorialTimeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self = self, self.isTutorialActive, let guide = self.activeTutorial else { return }
-
-            let currentSeconds = CMTimeGetSeconds(time)
-            let currentStep = self.tutorialStepIndex
-
-            // Look ahead: if the NEXT step's timestamp has been reached, pause
-            // and show the CURRENT step (what user needs to do now)
-            let nextStepIndex = currentStep + 1
-            if nextStepIndex < guide.steps.count {
-                let nextTimestamp = guide.steps[nextStepIndex].timestamp
-                if currentSeconds >= nextTimestamp - 0.5 {
-                    // Pause slightly before the next step starts
-                    player.pause()
-                    // Show the NEXT step — this is what the user needs to do
-                    self.tutorialStepIndex = nextStepIndex
-                    let step = guide.steps[nextStepIndex]
-                    self.showTutorialStep(step)
-                    print("[Tutorial] Paused at \(String(format: "%.1f", currentSeconds))s → Step \(nextStepIndex + 1): \(step.hint)")
-                }
-            }
-        }
-    }
-
-
-    // MARK: - Onboarding Video State (shared across all screen overlays)
-
-    // Kept under "onboardingVideoPlayer" name for now because the tutorial
-    // flow reuses this property to render tutorial videos through the
-    // same SwiftUI view. TODO: rename to `tutorialVideoPlayer` in a
-    // dedicated cleanup pass.
-    @Published var onboardingVideoPlayer: AVPlayer?
-    @Published var showOnboardingVideo: Bool = false
-    @Published var onboardingVideoOpacity: Double = 0.0
 
     // MARK: - Onboarding Hotkey-Prompt Bubble
 
@@ -1341,15 +1525,7 @@ final class CompanionManager: ObservableObject {
                 print("[Target] user's app at hotkey press: \(frontmost.bundleIdentifier ?? "?") (\(frontmost.localizedName ?? "?"))")
             }
 
-            // If a tutorial is active, advance to next step instead of dictation
-            if isTutorialActive {
-                advanceTutorial()
-                return
-            }
-
             guard !buddyDictationManager.isDictationInProgress else { return }
-            // Don't register push-to-talk while the onboarding video is playing
-            guard !showOnboardingVideo else { return }
 
             // Cancel any pending transient hide so the overlay stays visible
             transientHideTask?.cancel()
@@ -1370,13 +1546,11 @@ final class CompanionManager: ObservableObject {
             elevenLabsTTSClient.stopPlayback()
             clearDetectedElementLocation()
 
-            // Clear any tutorial/prompt overlay
+            // Clear any prompt overlay
             showOnboardingPrompt = false
             onboardingPromptText = ""
             onboardingPromptOpacity = 0.0
-            tutorialActionType = ""
-            tutorialKeyLabel = ""
-    
+
 
             TipTourAnalytics.trackPushToTalkStarted()
 

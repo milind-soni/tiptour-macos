@@ -21,6 +21,11 @@ extension Notification.Name {
     /// click-outside monitor based on the new pinned state, without
     /// hiding the panel.
     static let tipTourPanelPinStateChanged = Notification.Name("tipTourPanelPinStateChanged")
+    /// Posted by CompanionManager when a tutorial starts in menuBar
+    /// mode, asking the menu bar panel to open immediately so the
+    /// embedded video is visible. The panel auto-pins for the
+    /// duration of the tutorial so outside clicks don't hide it.
+    static let tipTourShowMenuBarPanelForTutorial = Notification.Name("tipTourShowMenuBarPanelForTutorial")
 }
 
 /// Custom NSPanel subclass that can become the key window even with
@@ -36,6 +41,7 @@ final class MenuBarPanelManager: NSObject {
     private var clickOutsideMonitor: Any?
     private var dismissPanelObserver: NSObjectProtocol?
     private var pinStateChangedObserver: NSObjectProtocol?
+    private var showForTutorialObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
     private let panelWidth: CGFloat = 320
@@ -68,6 +74,21 @@ final class MenuBarPanelManager: NSObject {
             } else {
                 self.installClickOutsideMonitor()
             }
+        }
+
+        // When a tutorial starts in menuBar mode, CompanionManager
+        // posts this notification — open the panel and remove the
+        // outside-click monitor for the duration of the tutorial so
+        // the user can click around in their app to follow along
+        // without dismissing the embedded video.
+        showForTutorialObserver = NotificationCenter.default.addObserver(
+            forName: .tipTourShowMenuBarPanelForTutorial,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.showPanel()
+            self.removeClickOutsideMonitor()
         }
     }
 
@@ -235,6 +256,16 @@ final class MenuBarPanelManager: NSObject {
         // should behave like a regular workspace window and ignore
         // outside clicks entirely.
         if companionManager.isPanelPinned {
+            return
+        }
+
+        // Same idea while a tutorial is running IN MENU BAR MODE —
+        // the user must be able to click around in their app to follow
+        // along, and the embedded video should stay visible the whole
+        // time. In cursor-following mode the video lives in the
+        // OverlayWindow chip, so the panel can dismiss normally.
+        if companionManager.isTutorialActive
+            && companionManager.tutorialVideoMode == .menuBar {
             return
         }
 
