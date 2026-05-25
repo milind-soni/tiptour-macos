@@ -32,8 +32,24 @@ The first Pipecat sidecar should expose:
 - `GET /v1/health`
 - `POST /v1/start`
 - `POST /v1/stop`
+- `GET /v1/events`
+- `GET /v1/tools`
+- `POST /v1/tools/{tool_name}`
 
 The Pipecat sidecar may use SmallWebRTC or WebSocket during local development. For production, prefer WebRTC/Daily-style transport and keep provider API keys server-side.
+When the Pipecat Voice connection is enabled in TipTour, the existing voice hotkey starts/stops this sidecar session instead of opening the built-in Gemini Live session.
+
+The current local sidecar lives at `harnesses/pipecat-voice`:
+
+```bash
+cd harnesses/pipecat-voice
+brew install portaudio
+uv venv --python 3.12
+uv pip install -e '.[pipecat]'
+uv run uvicorn server:app --host 127.0.0.1 --port 7860
+```
+
+TipTour passes the saved Gemini API key to the localhost sidecar when starting a voice session. For standalone curl tests, export `GOOGLE_API_KEY` or `GEMINI_API_KEY`.
 
 ## Tool Policy
 

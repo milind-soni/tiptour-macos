@@ -186,6 +186,8 @@ struct TipTourSettingsView: View {
                     set: { companionManager.setPipecatVoiceHarnessEnabled($0) }
                 )
             )
+
+            pipecatConnectionCard
         }
     }
 
@@ -262,6 +264,63 @@ struct TipTourSettingsView: View {
                     .truncationMode(.middle)
                     .padding(.leading, 34)
             }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var pipecatConnectionCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                rowIcon("waveform")
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pipecat Sidecar")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Text(companionManager.pipecatVoiceHarnessStatus.detail)
+                        .font(.system(size: 11))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                statusBadge(companionManager.pipecatVoiceHarnessStatus.state)
+            }
+
+            HStack(spacing: 8) {
+                Spacer(minLength: 34)
+
+                Button("Test") {
+                    Task {
+                        await companionManager.testPipecatVoiceHarnessConnection()
+                    }
+                }
+                .controlSize(.small)
+                .font(.system(size: 11, weight: .medium))
+                .buttonStyle(.bordered)
+                .pointerCursor()
+
+                Button(companionManager.pipecatVoiceHarnessStatus.isActive ? "Stop" : "Start") {
+                    Task {
+                        if companionManager.pipecatVoiceHarnessStatus.isActive {
+                            await companionManager.stopPipecatVoiceHarness()
+                        } else {
+                            companionManager.setPipecatVoiceHarnessEnabled(true)
+                        }
+                    }
+                }
+                .controlSize(.small)
+                .font(.system(size: 11, weight: .medium))
+                .buttonStyle(.borderedProminent)
+                .tint(DS.Colors.accent)
+                .pointerCursor()
+            }
+
+            Text("Run harnesses/pipecat-voice on 127.0.0.1:7860. The sidecar calls TipTour's local harness for observe, targets, and actions.")
+                .font(.system(size: 10))
+                .foregroundColor(DS.Colors.textTertiary.opacity(0.85))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 34)
         }
         .padding(.vertical, 8)
     }
@@ -515,6 +574,18 @@ struct TipTourSettingsView: View {
         .lineLimit(1)
     }
 
+    private func statusBadge(_ state: PipecatVoiceHarnessConnectionState) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(pipecatStatusColor(state))
+                .frame(width: 6, height: 6)
+            Text(state.title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(pipecatStatusColor(state))
+        }
+        .lineLimit(1)
+    }
+
     private func hermesStatusColor(_ state: HermesConnectionState) -> Color {
         switch state {
         case .connected:
@@ -524,6 +595,21 @@ struct TipTourSettingsView: View {
         case .wrongServer:
             return DS.Colors.warning
         case .notFound, .notRunning, .error:
+            return DS.Colors.destructiveText
+        case .idle:
+            return DS.Colors.textTertiary
+        }
+    }
+
+    private func pipecatStatusColor(_ state: PipecatVoiceHarnessConnectionState) -> Color {
+        switch state {
+        case .connected:
+            return DS.Colors.success
+        case .checking:
+            return DS.Colors.textSecondary
+        case .wrongServer:
+            return DS.Colors.warning
+        case .notRunning, .error:
             return DS.Colors.destructiveText
         case .idle:
             return DS.Colors.textTertiary

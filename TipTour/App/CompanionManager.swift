@@ -58,6 +58,7 @@ final class CompanionManager: ObservableObject {
     @Published var hermesAPIBaseURL: String = TipTourDefaults.hermesAPIBaseURL
     @Published private(set) var hermesConnectionStatus: HermesConnectionStatus = .idle
     @Published var isPipecatVoiceHarnessEnabled: Bool = TipTourDefaults.isPipecatVoiceHarnessEnabled
+    @Published private(set) var pipecatVoiceHarnessStatus: PipecatVoiceHarnessConnectionStatus = .idle
 
     /// Whether the blue cursor overlay is currently visible on screen.
     @Published private(set) var isOverlayVisible: Bool = false
@@ -780,14 +781,83 @@ final class CompanionManager: ObservableObject {
         isPipecatVoiceHarnessEnabled = enabled
         TipTourDefaults.isPipecatVoiceHarnessEnabled = enabled
 
-        guard enabled else { return }
         Task {
-            do {
-                let health = try await pipecatVoiceHarnessClient.health()
-                print("[PipecatHarness] health ok=\(health.ok) service=\(health.service ?? "unknown")")
-            } catch {
-                print("[PipecatHarness] enabled, but local sidecar is not reachable yet: \(error.localizedDescription)")
+            if enabled {
+                await startPipecatVoiceHarness()
+            } else {
+                await stopPipecatVoiceHarness()
             }
+        }
+    }
+
+    func testPipecatVoiceHarnessConnection() async {
+        pipecatVoiceHarnessStatus = PipecatVoiceHarnessConnectionStatus(
+            state: .checking,
+            baseURL: PipecatVoiceHarnessClient.defaultBaseURL.absoluteString,
+            detail: "Checking Pipecat sidecar.",
+            isActive: false,
+            isPipecatInstalled: pipecatVoiceHarnessStatus.isPipecatInstalled
+        )
+        pipecatVoiceHarnessStatus = await pipecatVoiceHarnessClient.testConnection()
+    }
+
+    func startPipecatVoiceHarness() async {
+        pipecatVoiceHarnessStatus = PipecatVoiceHarnessConnectionStatus(
+            state: .checking,
+            baseURL: PipecatVoiceHarnessClient.defaultBaseURL.absoluteString,
+            detail: "Starting Pipecat sidecar session.",
+            isActive: false,
+            isPipecatInstalled: pipecatVoiceHarnessStatus.isPipecatInstalled
+        )
+
+        do {
+            let health = try await pipecatVoiceHarnessClient.start(
+                hermesBaseURL: hermesAPIBaseURL
+            )
+            let installed = health.pipecat?.installed
+            let isActive = health.active ?? false
+            pipecatVoiceHarnessStatus = PipecatVoiceHarnessConnectionStatus(
+                state: health.service == "tiptour-pipecat-voice"
+                    ? (isActive ? .connected : .error)
+                    : .wrongServer,
+                baseURL: PipecatVoiceHarnessClient.defaultBaseURL.absoluteString,
+                detail: health.lastError
+                    ?? (installed == true
+                        ? "Pipecat sidecar session is active."
+                        : "Sidecar session is active. Optional Pipecat runtime is not installed yet."),
+                isActive: isActive,
+                isPipecatInstalled: installed
+            )
+        } catch {
+            pipecatVoiceHarnessStatus = PipecatVoiceHarnessConnectionStatus(
+                state: .notRunning,
+                baseURL: PipecatVoiceHarnessClient.defaultBaseURL.absoluteString,
+                detail: "Start the sidecar on 127.0.0.1:7860, then try again.",
+                isActive: false,
+                isPipecatInstalled: nil
+            )
+            print("[PipecatHarness] start failed: \(error.localizedDescription)")
+        }
+    }
+
+    func stopPipecatVoiceHarness() async {
+        do {
+            let health = try await pipecatVoiceHarnessClient.stop()
+            pipecatVoiceHarnessStatus = PipecatVoiceHarnessConnectionStatus(
+                state: .connected,
+                baseURL: PipecatVoiceHarnessClient.defaultBaseURL.absoluteString,
+                detail: "Pipecat sidecar is reachable; voice session is stopped.",
+                isActive: health.active ?? false,
+                isPipecatInstalled: health.pipecat?.installed
+            )
+        } catch {
+            pipecatVoiceHarnessStatus = PipecatVoiceHarnessConnectionStatus(
+                state: .notRunning,
+                baseURL: PipecatVoiceHarnessClient.defaultBaseURL.absoluteString,
+                detail: "Pipecat sidecar is not running.",
+                isActive: false,
+                isPipecatInstalled: nil
+            )
         }
     }
 
@@ -1417,9 +1487,25 @@ final class CompanionManager: ObservableObject {
 
         TipTourAnalytics.trackPushToTalkStarted()
 
-        // Voice is intentionally a single realtime path. Text commands can
-        // still route through Claude/Hermes, but speech should not branch into
-        // a second STT/TTS stack.
+        if isPipecatVoiceHarnessEnabled {
+            if pipecatVoiceHarnessStatus.isActive {
+                Task {
+                    await stopPipecatVoiceHarness()
+                    voiceState = .idle
+                }
+            } else {
+                voiceState = .listening
+                Task {
+                    await startPipecatVoiceHarness()
+                    if pipecatVoiceHarnessStatus.state != .connected {
+                        voiceState = .idle
+                        lastTranscript = pipecatVoiceHarnessStatus.detail
+                    }
+                }
+            }
+            return
+        }
+
         if voiceBackend.isActive {
             stopVoiceSession()
             voiceState = .idle
@@ -2886,9 +2972,15 @@ final class CompanionManager: ObservableObject {
         _ = await ElementResolver.shared.tryAccessibilityTree(label: "__warmup__")
     }
 
-    /// End the Gemini Live session.
+    /// End the active voice session.
     func stopVoiceSession() {
         WorkflowRunner.shared.stop()
+        if isPipecatVoiceHarnessEnabled || pipecatVoiceHarnessStatus.isActive {
+            Task {
+                await stopPipecatVoiceHarness()
+            }
+            return
+        }
         _voiceBackend?.stop()
     }
 }

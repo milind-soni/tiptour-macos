@@ -1,0 +1,20 @@
+[project]
+name = "tiptour-pipecat-voice"
+version = "0.1.0"
+description = "Local Pipecat voice sidecar for TipTour"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "fastapi>=0.115.6,<1",
+    "httpx>=0.28.1,<1",
+    "pydantic>=2.10.6,<3",
+    "python-dotenv>=1.0.1,<2",
+    "uvicorn>=0.32.0,<1",
+]
+
+[project.optional-dependencies]
+pipecat = [
+    "pipecat-ai[google,local,runner,silero,websocket]>=0.0.87",
+]
+
+[tool.ruff]
+line-length = 100
