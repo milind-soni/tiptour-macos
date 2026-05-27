@@ -853,6 +853,17 @@ struct CompanionPanelView: View {
                     NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
                 }
 
+                footerIconButton("Follow", systemImage: "play.rectangle.on.rectangle") {
+                    PipelineLogStore.shared.record(
+                        category: "ui",
+                        name: "open_follow_along_window",
+                        status: "ok",
+                        message: "Opened TipTour follow-along window."
+                    )
+                    NotificationCenter.default.post(name: .tipTourOpenFollowAlong, object: nil)
+                    NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+                }
+
                 Spacer()
 
                 footerIconButton("Quit", systemImage: "power") {

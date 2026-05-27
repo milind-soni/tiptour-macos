@@ -390,6 +390,22 @@ final class PipelineLogStore: ObservableObject {
         copyToPasteboard(events.map(\.jsonLine).joined(separator: "\n"))
     }
 
+    func clearLogs() {
+        ensureLogDirectoryExists()
+        let logFiles = (try? FileManager.default.contentsOfDirectory(
+            at: logsDirectoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []
+
+        for fileURL in logFiles where fileURL.pathExtension == "jsonl" {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+
+        events = []
+        currentLogFilePath = currentLogFileURL.path
+    }
+
     private func appendToDisk(_ event: PipelineLogEvent) {
         ensureLogDirectoryExists()
         currentLogFilePath = currentLogFileURL.path
@@ -563,6 +579,10 @@ private struct TipTourLogsWindowView: View {
 
             terminalAction("reload") {
                 logStore.reloadFromDisk()
+            }
+
+            terminalAction("clear") {
+                logStore.clearLogs()
             }
 
             terminalAction("reveal") {

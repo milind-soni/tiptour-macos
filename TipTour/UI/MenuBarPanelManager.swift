@@ -12,6 +12,7 @@ extension Notification.Name {
     static let tipTourDismissPanel = Notification.Name("tipTourDismissPanel")
     static let tipTourOpenSettings = Notification.Name("tipTourOpenSettings")
     static let tipTourOpenLogs = Notification.Name("tipTourOpenLogs")
+    static let tipTourOpenFollowAlong = Notification.Name("tipTourOpenFollowAlong")
     static let tipTourPanelPinStateChanged = Notification.Name("tipTourPanelPinStateChanged")
     static let tipTourUserInterfaceActionExecuted = Notification.Name("tipTourUserInterfaceActionExecuted")
 }
@@ -22,9 +23,11 @@ final class MenuBarPanelManager: NSObject {
     private var panel: FloatingCompanionPanel<CompanionPanelView>?
     private var settingsWindowManager: TipTourSettingsWindowManager?
     private var logsWindowManager: TipTourLogsWindowManager?
+    private var followAlongWindowManager: TipTourFollowAlongWindowManager?
     private var dismissPanelObserver: NSObjectProtocol?
     private var openSettingsObserver: NSObjectProtocol?
     private var openLogsObserver: NSObjectProtocol?
+    private var openFollowAlongObserver: NSObjectProtocol?
     private var pinStateChangedObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
@@ -36,6 +39,7 @@ final class MenuBarPanelManager: NSObject {
         super.init()
         settingsWindowManager = TipTourSettingsWindowManager(companionManager: companionManager)
         logsWindowManager = TipTourLogsWindowManager()
+        followAlongWindowManager = TipTourFollowAlongWindowManager(companionManager: companionManager)
         createStatusItem()
         installPanelObservers()
     }
@@ -48,6 +52,9 @@ final class MenuBarPanelManager: NSObject {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = openLogsObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = openFollowAlongObserver {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = pinStateChangedObserver {
@@ -195,6 +202,16 @@ final class MenuBarPanelManager: NSObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.logsWindowManager?.show()
+            }
+        }
+
+        openFollowAlongObserver = NotificationCenter.default.addObserver(
+            forName: .tipTourOpenFollowAlong,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.followAlongWindowManager?.show()
             }
         }
 
