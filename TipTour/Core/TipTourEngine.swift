@@ -1981,6 +1981,7 @@ final class TipTourEngine {
             || reason.contains("failed")
             || reason.contains("uncertain")
             || reason.contains("state_did_not_change")
+            || reason.contains("follow_along")
     }
 
     private func isVisualCanvasApplication(_ application: NSRunningApplication?) -> Bool {
@@ -2009,6 +2010,8 @@ final class TipTourEngine {
         requestedTargetMark: Int?,
         targets: [LocalPerceptionTargetCache.SnapshotTarget]
     ) -> LocalPerceptionTargetCache.SnapshotTarget? {
+        let requestedIDLabel = requestedTargetID.flatMap(Self.labelFromTargetID)
+
         if let requestedTargetID = requestedTargetID?.trimmingCharacters(in: .whitespacesAndNewlines),
            !requestedTargetID.isEmpty,
            let target = targets.first(where: { $0.id == requestedTargetID }) {
@@ -2018,10 +2021,24 @@ final class TipTourEngine {
         if let requestedTargetMark,
            requestedTargetMark > 0,
            let target = targets.first(where: { $0.mark == requestedTargetMark }) {
+            if let requestedIDLabel,
+               labelMatchScore(query: requestedIDLabel, label: target.label) == nil {
+                return nil
+            }
             return target
         }
 
         return nil
+    }
+
+    private static func labelFromTargetID(_ targetID: String) -> String? {
+        let parts = targetID.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count > 5 else { return nil }
+        let coordinateParts = parts.suffix(4)
+        guard coordinateParts.allSatisfy({ Int($0) != nil }) else { return nil }
+        let labelParts = parts.dropFirst().dropLast(4)
+        let label = labelParts.joined(separator: ":").trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.isEmpty ? nil : label
     }
 
     private func bestTarget(
@@ -2319,6 +2336,12 @@ final class TipTourEngine {
     }
 
     private func labelMatchScore(query: String, label: String) -> Double? {
+        let compactQuery = normalizedCommandText(query)
+        let compactLabel = normalizedCommandText(label)
+        if !compactQuery.isEmpty, compactQuery == compactLabel {
+            return 100
+        }
+
         let queryWords = meaningfulWords(from: query)
         let labelWords = meaningfulWords(from: label)
         guard !queryWords.isEmpty, !labelWords.isEmpty else { return nil }
@@ -2350,7 +2373,7 @@ final class TipTourEngine {
 
         let distance = editDistance(query, label)
         if distance == 1 { return 68 }
-        if distance == 2, max(query.count, label.count) >= 8 { return 54 }
+        if distance == 2, max(query.count, label.count) >= 5 { return 54 }
         return nil
     }
 
@@ -2382,7 +2405,8 @@ final class TipTourEngine {
     private func meaningfulWords(from text: String) -> [String] {
         let stopWords: Set<String> = [
             "the", "a", "an", "this", "that", "button", "menu", "item",
-            "click", "press", "choose", "select"
+            "click", "press", "choose", "select", "open", "add", "go", "to",
+            "category", "submenu", "panel", "field", "option", "icon", "target"
         ]
         let words = text
             .lowercased()
@@ -2460,7 +2484,7 @@ final class TipTourEngine {
             intent: intent,
             candidates: aiCandidates
         ),
-           let target = target(for: directMatch, in: candidateTargets) {
+           let target = target(for: directMatch, in: candidateTargets, query: query) {
             return target
         }
 
@@ -2470,6 +2494,7 @@ final class TipTourEngine {
         ) {
             return candidateTargets.first {
                 $0.label.caseInsensitiveCompare(workerMatch) == .orderedSame
+                    && aiMatchedTargetIsAcceptable(query: query, target: $0)
             }
         }
 
@@ -2588,32 +2613,51 @@ final class TipTourEngine {
 
     private func target(
         for match: AIGroundingMatch,
-        in targets: [LocalPerceptionTargetCache.SnapshotTarget]
+        in targets: [LocalPerceptionTargetCache.SnapshotTarget],
+        query: String
     ) -> LocalPerceptionTargetCache.SnapshotTarget? {
         if let confidence = match.confidence, confidence < 0.45 {
             return nil
         }
 
+        let matchedTarget: LocalPerceptionTargetCache.SnapshotTarget?
         if let index = match.index,
            index > 0,
            index <= targets.count {
-            return targets[index - 1]
-        }
-
-        let matchedTargetID = (match.target_id ?? match.targetID)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let matchedTargetID, !matchedTargetID.isEmpty {
-            return targets.first { $0.id == matchedTargetID }
-        }
-
-        let matchedLabel = match.match?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let matchedLabel, !matchedLabel.isEmpty {
-            return targets.first {
-                $0.label.caseInsensitiveCompare(matchedLabel) == .orderedSame
+            matchedTarget = targets[index - 1]
+        } else {
+            let matchedTargetID = (match.target_id ?? match.targetID)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let matchedTargetID, !matchedTargetID.isEmpty {
+                matchedTarget = targets.first { $0.id == matchedTargetID }
+            } else if let matchedLabel = match.match?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !matchedLabel.isEmpty {
+                matchedTarget = targets.first {
+                    $0.label.caseInsensitiveCompare(matchedLabel) == .orderedSame
+                }
+            } else {
+                matchedTarget = nil
             }
         }
 
-        return nil
+        guard let matchedTarget,
+              aiMatchedTargetIsAcceptable(query: query, target: matchedTarget) else {
+            return nil
+        }
+        return matchedTarget
+    }
+
+    private func aiMatchedTargetIsAcceptable(
+        query: String,
+        target: LocalPerceptionTargetCache.SnapshotTarget
+    ) -> Bool {
+        guard let score = labelMatchScore(query: query, label: target.label) else {
+            return false
+        }
+
+        // Keep the cheap AI matcher as an OCR typo/ambiguity resolver, not
+        // as a planner. This allows Cube -> Cude, but rejects Cube -> Add.
+        return score >= 54
     }
 
     private struct GroundedActionExecutionResult {

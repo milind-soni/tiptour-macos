@@ -14,6 +14,7 @@ struct MarkdownAppSkillRuntimeHints: Decodable {
     let commandAliases: [CommandAlias]
     let inputPolicies: [InputPolicy]
     let targetPolicies: TargetPolicies?
+    let followAlongRewrites: [FollowAlongRewrite]?
     let plannerInstructions: [String]
 
     struct AppMatchers: Decodable {
@@ -40,6 +41,16 @@ struct MarkdownAppSkillRuntimeHints: Decodable {
         struct MenuSelection: Decodable {
             let preferLeftMenuRegionMaxX: Double?
         }
+    }
+
+    struct FollowAlongRewrite: Decodable {
+        let phrases: [String]
+        let actionTypes: [WorkflowStep.StepType]?
+        let type: WorkflowStep.StepType
+        let label: String?
+        let visibleLabelsInOrder: [String]?
+        let value: String?
+        let targetContext: WorkflowStep.TargetContext?
     }
 }
 
@@ -101,6 +112,46 @@ struct MarkdownAppSkill {
         }
     }
 
+    func followAlongRewrite(
+        for step: WorkflowStep,
+        sourceText: String,
+        visibleTargets: [LocalPerceptionTargetCache.SnapshotTarget] = []
+    ) -> MarkdownAppSkillRuntimeHints.FollowAlongRewrite? {
+        let normalizedCommandText = Self.normalizedCommandText(
+            "\(sourceText) \(step.hint) \(step.label ?? "")"
+        )
+        guard let rewrite = runtimeHints.followAlongRewrites?.first(where: { rewrite in
+            if let actionTypes = rewrite.actionTypes,
+               !actionTypes.contains(step.type) {
+                return false
+            }
+            return rewrite.phrases.contains {
+                normalizedCommandText.contains(Self.normalizedCommandText($0))
+            }
+        }) else {
+            return nil
+        }
+
+        guard let visibleLabelsInOrder = rewrite.visibleLabelsInOrder,
+              !visibleLabelsInOrder.isEmpty,
+              let visibleLabel = Self.firstVisibleLabel(
+                from: visibleLabelsInOrder,
+                visibleTargets: visibleTargets
+              ) else {
+            return rewrite
+        }
+
+        return MarkdownAppSkillRuntimeHints.FollowAlongRewrite(
+            phrases: rewrite.phrases,
+            actionTypes: rewrite.actionTypes,
+            type: rewrite.type,
+            label: visibleLabel,
+            visibleLabelsInOrder: rewrite.visibleLabelsInOrder,
+            value: rewrite.value,
+            targetContext: rewrite.targetContext
+        )
+    }
+
     var menuSelectionPreferredLeftRegionMaxX: Double? {
         runtimeHints.targetPolicies?.menuSelection?.preferLeftMenuRegionMaxX
     }
@@ -131,6 +182,22 @@ struct MarkdownAppSkill {
         text
             .lowercased()
             .filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func firstVisibleLabel(
+        from preferredLabels: [String],
+        visibleTargets: [LocalPerceptionTargetCache.SnapshotTarget]
+    ) -> String? {
+        for preferredLabel in preferredLabels {
+            let normalizedPreferredLabel = normalizedCommandText(preferredLabel)
+            guard !normalizedPreferredLabel.isEmpty else { continue }
+            if let target = visibleTargets.first(where: {
+                normalizedCommandText($0.label) == normalizedPreferredLabel
+            }) {
+                return target.label
+            }
+        }
+        return nil
     }
 
     private static func normalizedMatcherText(_ text: String) -> String {

@@ -110,4 +110,10 @@ enum KeychainStore {
         set { set(newValue ?? "", forKey: "claudeAPIKey") }
     }
 
+    /// OpenRouter API key used for optional follow-along video/context enrichment.
+    static var openRouterAPIKey: String? {
+        get { get(forKey: "openRouterAPIKey") }
+        set { set(newValue ?? "", forKey: "openRouterAPIKey") }
+    }
+
 }

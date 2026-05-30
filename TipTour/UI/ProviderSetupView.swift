@@ -14,6 +14,8 @@ struct ProviderSetupView: View {
     @State private var devGeminiKeyStatus: String = ""
     @State private var devClaudeKeyInput: String = ""
     @State private var devClaudeKeyStatus: String = ""
+    @State private var devOpenRouterKeyInput: String = ""
+    @State private var devOpenRouterKeyStatus: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -23,6 +25,7 @@ struct ProviderSetupView: View {
         .onAppear {
             devGeminiKeyInput = KeychainStore.geminiAPIKey ?? ""
             devClaudeKeyInput = KeychainStore.claudeAPIKey ?? ""
+            devOpenRouterKeyInput = KeychainStore.openRouterAPIKey ?? ""
         }
     }
 
@@ -75,6 +78,21 @@ struct ProviderSetupView: View {
                 status: $devClaudeKeyStatus,
                 hasSavedKey: hasSavedClaudeKey
             )
+
+            byokKeyRow(
+                title: "OpenRouter",
+                placeholder: "sk-or-v1-...",
+                input: $devOpenRouterKeyInput,
+                save: {
+                    KeychainStore.openRouterAPIKey = devOpenRouterKeyInput
+                },
+                clear: {
+                    devOpenRouterKeyInput = ""
+                    KeychainStore.openRouterAPIKey = nil
+                },
+                status: $devOpenRouterKeyStatus,
+                hasSavedKey: hasSavedOpenRouterKey
+            )
         }
     }
 
@@ -84,6 +102,10 @@ struct ProviderSetupView: View {
 
     private var hasSavedClaudeKey: Bool {
         !(KeychainStore.claudeAPIKey ?? "").isEmpty
+    }
+
+    private var hasSavedOpenRouterKey: Bool {
+        !(KeychainStore.openRouterAPIKey ?? "").isEmpty
     }
 
     private func byokKeyRow(
@@ -106,7 +128,7 @@ struct ProviderSetupView: View {
             Text(title)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(DS.Colors.textSecondary)
-                .frame(width: 58, alignment: .leading)
+                .frame(width: 82, alignment: .leading)
 
             SecureField(placeholder, text: input)
                 .textFieldStyle(.plain)

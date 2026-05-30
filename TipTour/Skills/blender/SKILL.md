@@ -14,6 +14,7 @@ If the user asks for a realistic, detailed, nice, downloaded, imported, or marke
 For one-action-at-a-time control:
 
 - Add objects through the visible `Add` menu, then `Mesh`, then the object type.
+- Add modifiers through the visible `Add Modifier` menu, then the category, then the modifier. For Subdivision Surface this is `Add Modifier` -> `Generate` -> `Subdivision Surface`.
 - After opening `Add` or any submenu, refresh visible targets before selecting the next menu item. In the TipTour harness this means call `/v1/targets`, then choose the menu item by `target_id` or `target_mark` when possible.
 - Do not rely on bare letter menu accelerators such as `M`, `P`, or `C` unless the correct Blender popup/submenu is visibly open and was just observed. Visible menu target clicks are safer for `Add > Mesh > Cube/Plane/Cone`.
 - For modal transforms, send physical key actions in sequence: `G` for grab/move, `S` for scale, `R` for rotate, then optional axis keys like `X`, `Y`, or `Z`, then numeric input, then `Return`.
@@ -121,6 +122,59 @@ For house tasks, prefer progress over perfection: create a body, a roof, a door,
       "label": "Escape"
     }
   ],
+  "followAlongRewrites": [
+    {
+      "phrases": ["open add menu"],
+      "actionTypes": ["click", "observe", "keyboardShortcut"],
+      "type": "click",
+      "label": "Add",
+      "targetContext": "visibleElement"
+    },
+    {
+      "phrases": ["add modifier", "add a modifier"],
+      "actionTypes": ["click", "observe"],
+      "type": "click",
+      "label": "Add Modifier",
+      "targetContext": "visibleElement"
+    },
+    {
+      "phrases": ["generate category", "generate subdivision surface", "reveal subdivision surface"],
+      "actionTypes": ["click", "observe"],
+      "type": "click",
+      "label": "Generate",
+      "visibleLabelsInOrder": ["Generate", "Add Modifier"],
+      "targetContext": "visibleElement"
+    },
+    {
+      "phrases": ["subdivision surface", "subdivison surface", "sulbdivision surface"],
+      "actionTypes": ["click", "observe"],
+      "type": "click",
+      "label": "Subdivision Surface",
+      "visibleLabelsInOrder": ["Subdivision Surface", "Generate"],
+      "targetContext": "visibleElement"
+    },
+    {
+      "phrases": ["face select", "face select mode", "switch to face select"],
+      "actionTypes": ["click", "observe"],
+      "type": "pressKey",
+      "label": "3",
+      "targetContext": "focusedElement"
+    },
+    {
+      "phrases": ["edge select", "edge select mode", "switch to edge select"],
+      "actionTypes": ["click", "observe"],
+      "type": "pressKey",
+      "label": "2",
+      "targetContext": "focusedElement"
+    },
+    {
+      "phrases": ["vertex select", "vertex select mode", "switch to vertex select"],
+      "actionTypes": ["click", "observe"],
+      "type": "pressKey",
+      "label": "1",
+      "targetContext": "focusedElement"
+    }
+  ],
   "inputPolicies": [
     {
       "kind": "numericModalText",
@@ -136,9 +190,14 @@ For house tasks, prefer progress over perfection: create a body, a roof, a door,
   },
   "plannerInstructions": [
     "Use one TipTour action at a time.",
+    "For Blender add-object menu actions, prefer exact visible labels such as Add, Mesh, Torus, Object, Quick Effects, Quick Liquid, Convert, and Properties.",
+    "For Blender add-object requests, the transcript words Taurus or donut usually mean the visible Blender label Torus.",
     "After opening Add or a Blender submenu, call /v1/targets before choosing Mesh, Cube, Plane, Cone, or other visible menu items.",
+    "For Blender modifiers, use exact visible one-hop labels: Add Modifier, then Generate, then Subdivision Surface. Do not target phrases like Generate category or Subdivision Surface modifier.",
+    "Subdivision Surface is in the Add Modifier > Generate submenu, not Geometry. If a repair or upcoming step mentions Subdivision Surface and Generate is visible but Subdivision Surface is not, click Generate. Do not choose Geometry for Subdivision Surface.",
     "Prefer visible menu target clicks with target_id or target_mark for Add > Mesh selections; do not rely on bare M/P/C menu accelerator keys unless the relevant submenu is visibly open and freshly observed.",
     "For Blender transforms, use key sequences like G, Z, type numeric value, Return.",
+    "If a modal numeric transform is already active, repair with type or pressKey, not a click.",
     "Each transform token is a separate TipTour action: S, type 3, Return must be sent as three separate /v1/workflow-plan requests.",
     "Never send S, a numeric value, and Return in one workflow plan. Never press S twice unless the previous scale command was cancelled.",
     "For Blender delete confirmations, press Return as a targetless key action; do not use /v1/plan-next-action to click a fuzzy OCR confirmation target.",

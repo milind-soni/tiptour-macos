@@ -135,6 +135,16 @@ struct TipTourFollowAlongWindowView: View {
                 }
                 .buttonStyle(FollowAlongButtonStyle())
                 .disabled(runner.isBusy || runner.youtubeURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Button {
+                    runner.enrichVideoContext()
+                } label: {
+                    Label("Enrich", systemImage: "sparkles")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(FollowAlongButtonStyle())
+                .disabled(runner.isBusy || runner.youtubeURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Extract sampled video frames and ask the saved OpenRouter/Qwen vision model for grounding context.")
             }
 
             HStack(spacing: 8) {
@@ -183,6 +193,29 @@ struct TipTourFollowAlongWindowView: View {
                 .disabled(!runner.isBusy)
             }
 
+            if !runner.enrichmentSummary.isEmpty {
+                HStack(spacing: 8) {
+                    Text("Video context")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(DS.Colors.accent)
+
+                    Text(runner.enrichmentSummary)
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .lineLimit(1)
+
+                    Spacer()
+
+                    Button {
+                        runner.copyEnrichmentSummary()
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .help("Copy video enrichment context")
+                }
+            }
         }
     }
 
@@ -228,6 +261,26 @@ struct TipTourFollowAlongWindowView: View {
                 .buttonStyle(.plain)
                 .foregroundColor(DS.Colors.textTertiary)
                 .help("Copy JSON steps")
+
+                Button {
+                    runner.copyTraceAsJSONL()
+                } label: {
+                    Image(systemName: "list.clipboard")
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(DS.Colors.textTertiary)
+                .help("Copy latest run trace")
+                .disabled(!runner.hasTrace)
+
+                Button {
+                    runner.copyTraceEvaluation()
+                } label: {
+                    Image(systemName: "checkmark.seal")
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(DS.Colors.textTertiary)
+                .help("Copy latest run evaluation")
+                .disabled(!runner.hasTrace)
 
                 Text("\(runner.steps.count)")
                     .font(.system(size: 11, design: .monospaced))
@@ -416,6 +469,8 @@ final class TipTourFollowAlongRunner: ObservableObject {
     @Published var steps: [TipTourFollowAlongStep] = []
     @Published var useAIPlanner = true
     @Published var autoRepair = true
+    @Published private(set) var enrichmentSummary = ""
+    @Published private(set) var latestTracePath = ""
     @Published private(set) var isBusy = false
     @Published private(set) var statusText = "Paste a script or load a YouTube transcript."
     @Published private(set) var logLines: [String] = []
@@ -424,8 +479,18 @@ final class TipTourFollowAlongRunner: ObservableObject {
         steps.contains { $0.status == .pending || $0.status == .failed }
     }
 
+    var hasTrace: Bool {
+        !latestTracePath.isEmpty
+    }
+
     private let engine: TipTourEngine
     private let aiPlanner = TipTourFollowAlongAIPlannerClient()
+    private let contextEnricher = TipTourFollowAlongContextEnricher()
+    private let traceStore = TipTourFollowAlongTraceStore.shared
+    private let traceEvaluator = TipTourFollowAlongTraceEvaluator()
+    private var currentTraceRunID = TipTourFollowAlongTraceStore.shared.makeRunID()
+    private var visualHistory: [TipTourFollowAlongVisualHistoryItem] = []
+    private var lastDistinctPreState: TipTourFollowAlongTraceStore.StateSnapshot?
     private var activeTask: Task<Void, Never>?
 
     init(engine: TipTourEngine) {
@@ -472,6 +537,62 @@ final class TipTourFollowAlongRunner: ObservableObject {
         }
     }
 
+    func enrichVideoContext() {
+        guard !isBusy else { return }
+        let rawURL = youtubeURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawURL.isEmpty else { return }
+        guard let apiKey = KeychainStore.openRouterAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !apiKey.isEmpty else {
+            statusText = "Save an OpenRouter key in Settings before enriching video context."
+            appendLog("enrich: missing OpenRouter key")
+            return
+        }
+
+        activeTask?.cancel()
+        activeTask = Task {
+            isBusy = true
+            statusText = "Extracting video frames..."
+            appendLog("enrich: frames")
+            defer { isBusy = false }
+
+            do {
+                let transcript = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+                let app = targetApp.trimmingCharacters(in: .whitespacesAndNewlines)
+                let result = try await contextEnricher.enrich(
+                    youtubeURL: rawURL,
+                    transcript: transcript.isEmpty ? "No transcript loaded yet." : transcript,
+                    targetAppName: app.isEmpty ? nil : app,
+                    openRouterAPIKey: apiKey,
+                    maxFrames: 8
+                )
+                enrichmentSummary = result.enrichment.plannerContext
+                statusText = "Enriched video context from \(result.frameExtraction.frames.count) frame(s) with \(result.enrichment.model)."
+                appendLog("enrich: \(result.frameExtraction.frames.count) frames")
+                PipelineLogStore.shared.record(
+                    category: "follow_along",
+                    name: "video_context_enrichment",
+                    status: "ok",
+                    message: "Enriched follow-along context from YouTube frames.",
+                    metadata: [
+                        "frame_count": String(result.frameExtraction.frames.count),
+                        "model": result.enrichment.model,
+                        "directory_path": result.frameExtraction.directory.path,
+                        "summary_characters": String(result.enrichment.plannerContext.count)
+                    ]
+                )
+            } catch {
+                statusText = error.localizedDescription
+                appendLog("enrich: failed")
+                PipelineLogStore.shared.record(
+                    category: "follow_along",
+                    name: "video_context_enrichment",
+                    status: "failed",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
     func generateSteps() {
         guard !isBusy else { return }
         let script = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -489,7 +610,7 @@ final class TipTourFollowAlongRunner: ObservableObject {
                 let generatedSteps: [TipTourFollowAlongStep]
                 if useAIPlanner, let apiKey = KeychainStore.claudeAPIKey, !apiKey.isEmpty {
                     let plan = try await aiPlanner.planSteps(
-                        transcript: script,
+                        transcript: plannerInput(from: script),
                         targetAppName: defaultApp.isEmpty ? nil : defaultApp,
                         apiKey: apiKey
                     )
@@ -504,6 +625,7 @@ final class TipTourFollowAlongRunner: ObservableObject {
                 }
 
                 steps = generatedSteps
+                resetTraceRun()
                 statusText = generatedSteps.isEmpty
                     ? "No executable steps found. Try shorter imperative lines like \"click Add\" or \"press Cmd+S\"."
                     : "Generated \(generatedSteps.count) step(s)."
@@ -521,6 +643,7 @@ final class TipTourFollowAlongRunner: ObservableObject {
                     defaultApp: defaultApp
                 )
                 steps = fallbackSteps
+                resetTraceRun()
                 statusText = "AI conversion failed, used rule parser: \(error.localizedDescription)"
                 appendLog("convert: ai failed, rules")
             }
@@ -536,6 +659,7 @@ final class TipTourFollowAlongRunner: ObservableObject {
             isBusy = true
             statusText = "Running follow-along steps..."
             appendLog("run: start")
+            resetTraceRun()
             defer {
                 isBusy = false
                 activeTask = nil
@@ -639,6 +763,33 @@ final class TipTourFollowAlongRunner: ObservableObject {
         }
         copyToPasteboard(text)
         statusText = "Copied JSON steps."
+    }
+
+    func copyEnrichmentSummary() {
+        guard !enrichmentSummary.isEmpty else { return }
+        copyToPasteboard(enrichmentSummary)
+        statusText = "Copied video enrichment context."
+    }
+
+    func copyTraceAsJSONL() {
+        do {
+            let text = try traceStore.readTrace(runID: currentTraceRunID)
+            copyToPasteboard(text)
+            statusText = "Copied follow-along trace JSONL."
+        } catch {
+            statusText = "No follow-along trace is available yet."
+        }
+    }
+
+    func copyTraceEvaluation() {
+        do {
+            let text = try traceStore.readTrace(runID: currentTraceRunID)
+            let report = traceEvaluator.evaluate(jsonl: text)
+            copyToPasteboard(report.text)
+            statusText = "Copied follow-along trace evaluation."
+        } catch {
+            statusText = "No follow-along trace is available yet."
+        }
     }
 
     private func runStep(at index: Int) async {
@@ -760,6 +911,13 @@ final class TipTourFollowAlongRunner: ObservableObject {
         let step = steps[index]
         let app = normalizedApp(step.app)
         let traceID = TipTourActionTrace.makeID(source: "follow")
+        let preState = await followAlongStateSnapshot(
+            traceID: "\(traceID)_pre",
+            step: step,
+            app: app,
+            reason: "follow_along_pre_action"
+        )
+        let stateActionState = stateActionMatchedState(for: preState)
         let preparedStep: WorkflowStep
         do {
             preparedStep = try await preparedWorkflowStep(for: step, app: app)
@@ -767,6 +925,18 @@ final class TipTourFollowAlongRunner: ObservableObject {
             steps[index].status = .failed
             steps[index].message = error.localizedDescription
             appendLog("step \(index + 1): preflight failed")
+            recordTrace(
+                runID: currentTraceRunID,
+                traceID: traceID,
+                stepIndex: index,
+                step: step,
+                app: app,
+                preparedStep: nil,
+                preState: preState,
+                stateActionState: stateActionState,
+                postState: nil,
+                result: .preflightFailure(error.localizedDescription)
+            )
             return (false, error.localizedDescription)
         }
         let plan = WorkflowPlan(
@@ -795,6 +965,24 @@ final class TipTourFollowAlongRunner: ObservableObject {
         )
 
         let result = await engine.submitSingleActionWorkflowPlanAndWait(plan)
+        let postState = await followAlongStateSnapshot(
+            traceID: "\(traceID)_post",
+            step: step,
+            app: app,
+            reason: "follow_along_post_action"
+        )
+        recordTrace(
+            runID: currentTraceRunID,
+            traceID: traceID,
+            stepIndex: index,
+            step: step,
+            app: app,
+            preparedStep: preparedStep,
+            preState: preState,
+            stateActionState: stateActionState,
+            postState: postState,
+            result: TipTourFollowAlongTraceStore.ResultSummary(submission: result)
+        )
         if result.ok {
             steps[index].status = .ok
             steps[index].message = result.message
@@ -808,14 +996,142 @@ final class TipTourFollowAlongRunner: ObservableObject {
         return (false, failureMessage)
     }
 
+    private func followAlongStateSnapshot(
+        traceID: String,
+        step: TipTourFollowAlongStep,
+        app: String?,
+        reason: String
+    ) async -> TipTourFollowAlongTraceStore.StateSnapshot {
+        let visualContext = await engine.visualContext(
+            intent: step.sourceText,
+            app: app,
+            requestedMode: "auto",
+            reason: reason,
+            targetLabel: step.workflowStep.label,
+            targetID: step.workflowStep.targetID,
+            targetMark: step.workflowStep.targetMark,
+            refresh: true,
+            traceID: traceID
+        )
+        let targetList = await engine.localPerceptionTargets(
+            refresh: false,
+            reason: "follow-along trace \(reason)"
+        )
+        updateVisualHistory(visualContext: visualContext, targets: targetList.targets)
+        return TipTourFollowAlongTraceStore.StateSnapshot(
+            visualContext: visualContext,
+            fullTargets: targetList.targets
+        )
+    }
+
+    private func recordTrace(
+        runID: String,
+        traceID: String,
+        stepIndex: Int,
+        step: TipTourFollowAlongStep,
+        app: String?,
+        preparedStep: WorkflowStep?,
+        preState: TipTourFollowAlongTraceStore.StateSnapshot,
+        stateActionState: TipTourFollowAlongTraceStore.StateSnapshot,
+        postState: TipTourFollowAlongTraceStore.StateSnapshot?,
+        result: TipTourFollowAlongTraceStore.ResultSummary
+    ) {
+        let chosenTarget = preparedStep.flatMap {
+            chosenTargetSummary(for: $0, stateActionState: stateActionState, postState: postState)
+        }
+        let record = TipTourFollowAlongTraceStore.Record(
+            schemaVersion: 1,
+            timestamp: Self.isoTimestamp(),
+            runID: runID,
+            traceID: traceID,
+            stepIndex: stepIndex + 1,
+            stepCount: steps.count,
+            sourceText: step.sourceText,
+            targetApp: app,
+            draftStep: step.workflowStep,
+            preparedStep: preparedStep,
+            preState: preState,
+            stateActionState: stateActionState,
+            postState: postState,
+            chosenTarget: chosenTarget,
+            result: result
+        )
+
+        do {
+            let fileURL = try traceStore.append(record)
+            latestTracePath = fileURL.path
+            PipelineLogStore.shared.record(
+                category: "follow_along",
+                name: "trace_record",
+                status: "ok",
+                message: "Saved follow-along trace record.",
+                metadata: [
+                    "run_id": runID,
+                    TipTourActionTrace.metadataKey: traceID,
+                    "step_index": String(stepIndex + 1),
+                    "path": fileURL.path,
+                    "result": result.status
+                ]
+            )
+        } catch {
+            appendLog("trace: failed")
+            PipelineLogStore.shared.record(
+                category: "follow_along",
+                name: "trace_record",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: [
+                    "run_id": runID,
+                    TipTourActionTrace.metadataKey: traceID,
+                    "step_index": String(stepIndex + 1)
+                ]
+            )
+        }
+    }
+
+    private func chosenTargetSummary(
+        for step: WorkflowStep,
+        stateActionState: TipTourFollowAlongTraceStore.StateSnapshot,
+        postState: TipTourFollowAlongTraceStore.StateSnapshot?
+    ) -> TipTourFollowAlongTraceStore.TargetSummary? {
+        let targets = stateActionState.targets + (postState?.targets ?? [])
+        if let targetID = step.targetID?.trimmingCharacters(in: .whitespacesAndNewlines), !targetID.isEmpty {
+            return targets.first { $0.id == targetID }
+        }
+        if let targetMark = step.targetMark {
+            return targets.first { $0.mark == targetMark }
+        }
+        return nil
+    }
+
     private func preparedWorkflowStep(for step: TipTourFollowAlongStep, app: String?) async throws -> WorkflowStep {
-        let workflowStep = normalizedWorkflowStepForExecution(
+        var preGroundTargets: [LocalPerceptionTargetCache.SnapshotTarget] = []
+        var workflowStep = normalizedWorkflowStepForExecution(
             step.workflowStep,
             sourceText: step.sourceText,
-            app: app
+            app: app,
+            visibleTargets: []
         )
-        if shouldPreGround(workflowStep), let label = workflowStep.label, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if shouldPreGround(workflowStep) {
             try? await Task.sleep(nanoseconds: 650_000_000)
+            let targetList = await engine.localPerceptionTargets(
+                refresh: true,
+                reason: "follow-along pre-ground"
+            )
+            preGroundTargets = targetList.targets
+            workflowStep = normalizedWorkflowStepForExecution(
+                step.workflowStep,
+                sourceText: step.sourceText,
+                app: app,
+                visibleTargets: targetList.targets
+            )
+        }
+
+        if shouldPreGround(workflowStep), let label = workflowStep.label, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let target = localPreGroundTarget(for: workflowStep, label: label, targets: preGroundTargets) {
+                return workflowStepWithTarget(workflowStep, target: TipTourEngineGroundedTarget(target))
+            }
+
             let grounded = await engine.groundTarget(
                 goal: step.sourceText,
                 app: app,
@@ -823,9 +1139,9 @@ final class TipTourFollowAlongRunner: ObservableObject {
                 targetLabel: label,
                 targetID: workflowStep.targetID,
                 targetMark: workflowStep.targetMark,
-                refresh: true,
+                refresh: false,
                 allowScreenshotPlanning: true,
-                allowAIMatch: false
+                allowAIMatch: true
             )
             guard grounded.ok, let target = grounded.target else {
                 throw NSError(
@@ -857,53 +1173,24 @@ final class TipTourFollowAlongRunner: ObservableObject {
     private func normalizedWorkflowStepForExecution(
         _ step: WorkflowStep,
         sourceText: String,
-        app: String?
+        app: String?,
+        visibleTargets: [LocalPerceptionTargetCache.SnapshotTarget]
     ) -> WorkflowStep {
-        guard normalizedText(app ?? "").contains("blender") else {
-            return step
-        }
-
-        let combinedText = normalizedText("\(sourceText) \(step.hint) \(step.label ?? "")")
-
-        let normalizedLabel = normalizedText(step.label ?? "")
-        if combinedText.contains("openaddmenu")
-            || (normalizedLabel == "shifta" && combinedText.contains("addmenu")) {
+        if let rewrite = MarkdownAppSkillRegistry.shared
+            .skill(applicationName: app)
+            .flatMap({
+                $0.followAlongRewrite(
+                    for: step,
+                    sourceText: sourceText,
+                    visibleTargets: visibleTargets
+                )
+            }) {
             return replacingWorkflowStep(
                 step,
-                type: .click,
-                label: "Add",
-                value: nil,
-                targetContext: .visibleElement
-            )
-        }
-
-        if combinedText.contains("faceselect") || combinedText.contains("facetselect") {
-            return replacingWorkflowStep(
-                step,
-                type: .pressKey,
-                label: "3",
-                value: nil,
-                targetContext: .focusedElement
-            )
-        }
-
-        if combinedText.contains("edgeselect") {
-            return replacingWorkflowStep(
-                step,
-                type: .pressKey,
-                label: "2",
-                value: nil,
-                targetContext: .focusedElement
-            )
-        }
-
-        if combinedText.contains("vertexselect") {
-            return replacingWorkflowStep(
-                step,
-                type: .pressKey,
-                label: "1",
-                value: nil,
-                targetContext: .focusedElement
+                type: rewrite.type,
+                label: rewrite.label,
+                value: rewrite.value,
+                targetContext: rewrite.targetContext
             )
         }
 
@@ -954,29 +1241,79 @@ final class TipTourFollowAlongRunner: ObservableObject {
         return step.targetMark != nil
     }
 
+    private func localPreGroundTarget(
+        for step: WorkflowStep,
+        label: String,
+        targets: [LocalPerceptionTargetCache.SnapshotTarget]
+    ) -> LocalPerceptionTargetCache.SnapshotTarget? {
+        if let targetID = step.targetID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !targetID.isEmpty,
+           let target = targets.first(where: { $0.id == targetID }),
+           labelsAreCompatible(label, target.label) {
+            return target
+        }
+
+        if let targetMark = step.targetMark,
+           let target = targets.first(where: { $0.mark == targetMark }),
+           labelsAreCompatible(label, target.label) {
+            return target
+        }
+
+        return targets
+            .compactMap { target -> (target: LocalPerceptionTargetCache.SnapshotTarget, score: Double)? in
+                guard let score = labelCompatibilityScore(label, target.label) else { return nil }
+                return (
+                    target,
+                    score + sourceScore(target.source) + min(target.confidence, 1.0)
+                )
+            }
+            .max { $0.score < $1.score }?
+            .target
+    }
+
     private func labelsAreCompatible(_ requestedLabel: String, _ candidateLabel: String) -> Bool {
+        labelCompatibilityScore(requestedLabel, candidateLabel) != nil
+    }
+
+    private func labelCompatibilityScore(_ requestedLabel: String, _ candidateLabel: String) -> Double? {
+        if normalizedText(requestedLabel) == normalizedText(candidateLabel) {
+            return 100
+        }
+
         let requestedWords = normalizedWords(requestedLabel)
         let candidateWords = normalizedWords(candidateLabel)
-        guard !requestedWords.isEmpty, !candidateWords.isEmpty else { return false }
+        guard !requestedWords.isEmpty, !candidateWords.isEmpty else { return nil }
 
-        if requestedWords == candidateWords { return true }
+        if requestedWords == candidateWords { return 96 }
         if requestedWords.count == 1,
            candidateWords.count == 1,
            let requested = requestedWords.first,
            let candidate = candidateWords.first {
-            return requested == candidate || editDistance(requested, candidate) <= 1
+            if requested == candidate { return 96 }
+            return editDistance(requested, candidate) <= 1 ? 68 : nil
         }
 
         if candidateWords.count > requestedWords.count,
            requestedWords.count == 1,
            let requested = requestedWords.first {
             let unsafeExpansions: Set<String> = ["mode", "modeling", "edit", "layout", "scene"]
-            return candidateWords.contains(requested)
-                && candidateWords.intersection(unsafeExpansions).isEmpty
+            if candidateWords.contains(requested),
+               candidateWords.intersection(unsafeExpansions).isEmpty {
+                return 58
+            }
+            return nil
         }
 
-        return requestedWords.isSubset(of: candidateWords)
-            || candidateWords.isSubset(of: requestedWords)
+        if requestedWords.isSubset(of: candidateWords)
+            || candidateWords.isSubset(of: requestedWords) {
+            return 54
+        }
+
+        return nil
+    }
+
+    private func sourceScore(_ source: String) -> Double {
+        source == "ocr" ? 4 : 1
     }
 
     private func normalizedWords(_ text: String) -> Set<String> {
@@ -1060,13 +1397,14 @@ final class TipTourFollowAlongRunner: ObservableObject {
 
         do {
             let suggestion = try await aiPlanner.repairStep(
-                transcript: transcriptText,
+                transcript: plannerInput(from: transcriptText),
                 targetAppName: app,
                 failedStepIndex: failedStepIndex,
                 failedStep: failedStep.workflowStep,
                 failureMessage: failureMessage,
                 nearbySteps: nearbySteps.map(\.workflowStep),
                 visibleTargets: targetList.targets,
+                visualHistory: visualHistory,
                 attemptNumber: attemptNumber,
                 apiKey: apiKey
             )
@@ -1170,8 +1508,19 @@ final class TipTourFollowAlongRunner: ObservableObject {
         _ step: TipTourFollowAlongStep,
         app: String?
     ) async -> (ok: Bool, message: String?) {
-        guard canRepairThroughGrounding(step.workflowStep),
-              let label = step.workflowStep.label,
+        let targetList = await engine.localPerceptionTargets(
+            refresh: true,
+            reason: "follow-along local repair"
+        )
+        let workflowStep = normalizedWorkflowStepForExecution(
+            step.workflowStep,
+            sourceText: step.sourceText,
+            app: app,
+            visibleTargets: targetList.targets
+        )
+
+        guard canRepairThroughGrounding(workflowStep),
+              let label = workflowStep.label,
               !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (false, "No local repair path for this step type.")
         }
@@ -1179,7 +1528,7 @@ final class TipTourFollowAlongRunner: ObservableObject {
         let repairResult = await engine.planNextAction(
             goal: step.sourceText,
             app: app,
-            requestedActionType: step.workflowStep.type,
+            requestedActionType: workflowStep.type,
             requestedTargetLabel: label,
             execute: true,
             allowScreenshotPlanning: true,
@@ -1202,6 +1551,93 @@ final class TipTourFollowAlongRunner: ObservableObject {
         if !stepApp.isEmpty { return stepApp }
         let defaultApp = targetApp.trimmingCharacters(in: .whitespacesAndNewlines)
         return defaultApp.isEmpty ? nil : defaultApp
+    }
+
+    private func plannerInput(from transcript: String) -> String {
+        let skillInstructions = activeSkillInstructions(for: targetApp)
+        let trimmedSummary = enrichmentSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+        var sections = [transcript]
+
+        if !skillInstructions.isEmpty {
+            sections.append(
+                """
+                Active app skill instructions:
+                \(skillInstructions)
+                """
+            )
+        }
+
+        if !trimmedSummary.isEmpty {
+            sections.append(
+                """
+                Video/frame context from sampled YouTube frames:
+                \(trimmedSummary)
+                """
+            )
+        }
+
+        return sections.joined(separator: "\n\n")
+    }
+
+    private func activeSkillInstructions(for app: String) -> String {
+        guard let skill = MarkdownAppSkillRegistry.shared.skill(applicationName: app),
+              !skill.runtimeHints.plannerInstructions.isEmpty else {
+            return ""
+        }
+
+        return """
+        Active app skill: \(skill.name)
+        \(skill.runtimeHints.plannerInstructions.map { "- \($0)" }.joined(separator: "\n"))
+        """
+    }
+
+    private func resetTraceRun() {
+        currentTraceRunID = traceStore.makeRunID()
+        latestTracePath = ""
+        visualHistory = []
+        lastDistinctPreState = nil
+    }
+
+    private func stateActionMatchedState(
+        for state: TipTourFollowAlongTraceStore.StateSnapshot
+    ) -> TipTourFollowAlongTraceStore.StateSnapshot {
+        guard let screenshotHash = state.screenshotHash, !screenshotHash.isEmpty else {
+            lastDistinctPreState = state
+            return state
+        }
+
+        if let lastDistinctPreState,
+           state.screenChangedSinceLastSnapshot == false {
+            return lastDistinctPreState
+        }
+
+        if lastDistinctPreState?.screenshotHash != screenshotHash {
+            lastDistinctPreState = state
+        }
+        return lastDistinctPreState ?? state
+    }
+
+    private func updateVisualHistory(
+        visualContext: TipTourEngineVisualContextSnapshot,
+        targets: [LocalPerceptionTargetCache.SnapshotTarget]
+    ) {
+        let item = TipTourFollowAlongVisualHistoryItem(
+            visualContext: visualContext,
+            targets: targets
+        )
+
+        if item.hasScreenshots {
+            if visualHistory.last?.screenshotHash != item.screenshotHash {
+                visualHistory.append(item)
+            }
+        } else if visualHistory.isEmpty {
+            visualHistory.append(item)
+        }
+        visualHistory = Array(visualHistory.suffix(3))
+    }
+
+    private static func isoTimestamp() -> String {
+        ISO8601DateFormatter().string(from: Date())
     }
 
     private func appendLog(_ line: String) {
@@ -1643,10 +2079,36 @@ private struct TipTourFollowAlongAIPlannerClient {
     private struct ContentBlock: Encodable {
         let type: String
         let text: String?
+        let source: ImageSource?
 
-        init(type: String, text: String? = nil) {
+        static func text(_ text: String) -> ContentBlock {
+            ContentBlock(type: "text", text: text, source: nil)
+        }
+
+        static func image(mediaType: String, base64Data: String) -> ContentBlock {
+            ContentBlock(
+                type: "image",
+                text: nil,
+                source: ImageSource(mediaType: mediaType, data: base64Data)
+            )
+        }
+
+        private init(type: String, text: String?, source: ImageSource?) {
             self.type = type
             self.text = text
+            self.source = source
+        }
+    }
+
+    private struct ImageSource: Encodable {
+        let type = "base64"
+        let mediaType: String
+        let data: String
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case mediaType = "media_type"
+            case data
         }
     }
 
@@ -1739,9 +2201,8 @@ private struct TipTourFollowAlongAIPlannerClient {
                 Message(
                     role: "user",
                     content: [
-                        ContentBlock(
-                            type: "text",
-                            text: """
+                        ContentBlock.text(
+                            """
                             Target app:
                             \(targetAppName ?? "unknown")
 
@@ -1791,9 +2252,25 @@ private struct TipTourFollowAlongAIPlannerClient {
         failureMessage: String,
         nearbySteps: [WorkflowStep],
         visibleTargets: [LocalPerceptionTargetCache.SnapshotTarget],
+        visualHistory: [TipTourFollowAlongVisualHistoryItem] = [],
         attemptNumber: Int,
         apiKey: String
     ) async throws -> TipTourFollowAlongRepairSuggestion {
+        let content = [
+            ContentBlock.text(
+                repairPrompt(
+                    transcript: transcript,
+                    targetAppName: targetAppName,
+                    failedStepIndex: failedStepIndex,
+                    failedStep: failedStep,
+                    failureMessage: failureMessage,
+                    nearbySteps: nearbySteps,
+                    visibleTargets: visibleTargets,
+                    attemptNumber: attemptNumber
+                )
+            )
+        ] + visualHistoryContentBlocks(from: visualHistory)
+
         let requestBody = MessagesRequest(
             model: "claude-sonnet-4-5-20250929",
             maxTokens: 1800,
@@ -1801,21 +2278,7 @@ private struct TipTourFollowAlongAIPlannerClient {
             messages: [
                 Message(
                     role: "user",
-                    content: [
-                        ContentBlock(
-                            type: "text",
-                            text: repairPrompt(
-                                transcript: transcript,
-                                targetAppName: targetAppName,
-                                failedStepIndex: failedStepIndex,
-                                failedStep: failedStep,
-                                failureMessage: failureMessage,
-                                nearbySteps: nearbySteps,
-                                visibleTargets: visibleTargets,
-                                attemptNumber: attemptNumber
-                            )
-                        )
-                    ]
+                    content: content
                 )
             ]
         )
@@ -1895,6 +2358,45 @@ private struct TipTourFollowAlongAIPlannerClient {
         """
     }
 
+    private func visualHistoryContentBlocks(
+        from visualHistory: [TipTourFollowAlongVisualHistoryItem]
+    ) -> [ContentBlock] {
+        visualHistory.suffix(3).flatMap { item -> [ContentBlock] in
+            var blocks: [ContentBlock] = [
+                .text(
+                    """
+                    Visual state before/around the failed action:
+                    \(item.promptSummary)
+                    """
+                )
+            ]
+
+            if let screenshot = item.screenshots.first,
+               let image = imagePayload(from: screenshot.dataURL, fallbackMediaType: screenshot.mediaType) {
+                blocks.append(.image(mediaType: image.mediaType, base64Data: image.base64Data))
+            }
+            return blocks
+        }
+    }
+
+    private func imagePayload(
+        from dataURL: String,
+        fallbackMediaType: String
+    ) -> (mediaType: String, base64Data: String)? {
+        let marker = ";base64,"
+        guard let range = dataURL.range(of: marker) else {
+            let trimmed = dataURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : (fallbackMediaType, trimmed)
+        }
+
+        let header = String(dataURL[..<range.lowerBound])
+        let mediaType = header.replacingOccurrences(of: "data:", with: "")
+        let payload = String(dataURL[range.upperBound...])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !payload.isEmpty else { return nil }
+        return (mediaType.isEmpty ? fallbackMediaType : mediaType, payload)
+    }
+
     private func encodeJSON<T: Encodable>(_ value: T) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -1947,12 +2449,11 @@ private struct TipTourFollowAlongAIPlannerClient {
 
     Rules:
     - Keep only concrete actions that the presenter tells the viewer to do.
+    - If the user message includes Active app skill instructions, follow those app-specific rules over generic transcript wording.
+    - If the user message includes Video/frame context, use it to correct transcript mistakes, prefer visible labels, and identify manual visual checkpoints.
     - Skip filler, narration, explanations, and non-action commentary.
     - Split multi-action instructions into one action per step.
     - For menus, emit only the next visible click, then the submenu click as another step.
-    - For Blender "add a torus/donut/taurus", use click Add, click Mesh, click Torus. The transcript word "Taurus" usually means Blender "Torus".
-    - For Blender menu actions, prefer exact visible labels: Add, Mesh, Torus, Object, Quick Effects, Quick Liquid, Convert, Mesh, Properties.
-    - Do not use a keyboard shortcut to open a Blender menu unless the transcript explicitly says to press that shortcut.
     - Use literal shortcut labels like Cmd+S, Cmd+Shift+F, Shift+A.
     - Use pressKey for one physical key like Return, Escape, X, Z, S, or Tab.
     - Use type only when the tutorial explicitly says to type text or a numeric value.
@@ -1986,13 +2487,11 @@ private struct TipTourFollowAlongAIPlannerClient {
 
     Strategy rules:
     - Use "insert_before" when the failed step is still correct but a prerequisite UI state is missing. Example: failed Mesh because the Add menu is closed, so insert click Add.
-    - Use "replace" when the failed step itself is wrong for the current screen. Example: target says Taurus but visible target is Torus.
+    - Use "replace" when the failed step itself is wrong for the current screen. Example: the transcript target is an alias or typo, but an equivalent visible label is present.
     - Use "skip" only for non-action checkpoints that cannot be safely automated from visible context.
     - Prefer exact target_id and target_mark from Current visible local targets for visible clicks.
     - Do not guess raw coordinates. If no target is visible, choose a setup action that is visible, or skip with a clear reason.
-    - For Blender menus, repair one visible menu hop at a time: Add -> Mesh -> Torus, Object -> Quick Effects -> Quick Liquid, Object -> Convert -> Mesh.
-    - For Blender "Taurus", use visible label "Torus".
-    - If a modal numeric transform is already active, repair with type or pressKey, not a click.
+    - If the prompt includes Active app skill instructions, follow those app-specific menu paths, aliases, and modal input rules.
     - If the failed step type is observe, do not return another observe step. Return click, keyboardShortcut, pressKey, type, setValue, scroll, openApp, openURL, or skip.
     - Treat observe hints with action verbs as repairable actions. Examples: "Select the icing" should become a click on the visible icing/object target; "Open particle properties" should become a click on the visible particle properties icon/label; "Enable Mesh checkbox" should become a click if the checkbox/label is visible.
     - Return exactly one step unless strategy is "skip"; skip may omit step.
